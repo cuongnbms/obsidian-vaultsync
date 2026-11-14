@@ -319,6 +319,51 @@ test("a binary file changed on both sides keeps both and does not try to merge",
 	assert.equal(await b.vault.exists(pending.copy), true, "both versions stay on disk");
 });
 
+test("a note rewritten end to end on one side keeps both and does not offer a merge", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const lines = Array.from({ length: 3000 }, (_, i) => `line ${i}`);
+	await a.edit("long.md", lines.join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+
+	// Every line now differs from the base: too far apart to line up.
+	await a.edit("long.md", lines.join("\r\n") + "\r\n");
+	await b.edit("long.md", lines.map((l, i) => (i === 5 ? "line five" : l)).join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+
+	const pending = b.index.conflicts[0];
+	assert.ok(pending, "the two versions still have to be put to a person");
+	assert.equal(pending.mergeable, false, "a merge of the whole file is not offered");
+	assert.equal(await b.vault.read(pending.copy), lines.map((l, i) => (i === 5 ? "line five" : l)).join("\n") + "\n");
+	await assert.rejects(b.engine.resolveConflict("long.md", "merged"), /cannot be merged/);
+});
+
+test("a merge asked for after the note was rewritten end to end is refused", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const lines = Array.from({ length: 3000 }, (_, i) => `line ${i}`);
+	const withLine5 = (text) => lines.map((l, i) => (i === 5 ? text : l));
+	await a.edit("long.md", lines.join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+	await a.edit("long.md", withLine5("from the mac").join("\n") + "\n");
+	await b.edit("long.md", withLine5("from the phone").join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+	assert.equal(b.index.conflicts[0]?.mergeable, true, "an ordinary conflict can be merged");
+
+	// Before choosing, somebody converts the note's line endings.
+	const rewritten = withLine5("from the mac").join("\r\n") + "\r\n";
+	await b.vault.write("long.md", rewritten);
+	await assert.rejects(b.engine.resolveConflict("long.md", "merged"), /cannot be merged/);
+	assert.equal(await b.vault.read("long.md"), rewritten, "the note is left as it was");
+	assert.equal(b.index.conflicts.length, 1, "and the question stays open");
+});
+
 test("choosing this device's version sends it to the other one", async (t) => {
 	const { a, b, cleanup } = await twoDevices();
 	t.after(cleanup);
@@ -1140,6 +1185,171 @@ test("a vault that existed before the plugin is uploaded on its first sync", asy
 	assert.equal(again.uploaded, 0);
 });
 
+// --- changes made while nobody was watching --------------------------------------
+// The watcher only hears about changes while Obsidian and the plugin are running.
+// A note edited by another app, or by a sync tool, while the plugin was off used to
+// stay on this device forever. vault.write and vault.remove below bypass the
+// watcher the same way.
+
+test("a note edited while the plugin was off is sent on the next start", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "v1\n");
+	await a.edit("y.md", "untouched\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.write("x.md", "v2, written by another app\n");
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.equal(report.uploaded, 1, JSON.stringify(report));
+	assert.equal(await b.vault.read("x.md"), "v2, written by another app\n");
+	assert.equal(await b.vault.read("y.md"), "untouched\n");
+});
+
+test("a note deleted while the plugin was off is deleted everywhere on the next start", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "keep\n");
+	await a.edit("y.md", "delete me\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.remove("y.md");
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.equal(report.deleted, 1, JSON.stringify(report));
+	assert.equal(await b.vault.exists("y.md"), false);
+	assert.equal(await b.vault.read("x.md"), "keep\n");
+});
+
+test("a note deleted while off and edited elsewhere comes back with the edit", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "v1\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.remove("x.md");
+	await b.edit("x.md", "v2 from the phone\n");
+	await b.sync();
+	a.restart();
+	await a.sync();
+	await a.sync();
+	await b.sync();
+
+	assert.equal(await a.vault.read("x.md"), "v2 from the phone\n");
+	assert.equal(await b.vault.read("x.md"), "v2 from the phone\n");
+});
+
+// Most of a vault gone at once is more often a folder that is not there right now
+// (an unmounted drive, cloud files evicted from the device) than a decision.
+async function vaultOf(t, count) {
+	const pair = await twoDevices();
+	t.after(pair.cleanup);
+	for (let i = 0; i < count; i++) await pair.a.edit(`n${String(i).padStart(2, "0")}.md`, `note ${i}\n`);
+	await pair.a.sync();
+	await pair.b.sync();
+	return pair;
+}
+
+test("most of the vault missing at start does not delete it everywhere", async (t) => {
+	const { a, b } = await vaultOf(t, 12);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	await a.vault.write("n11.md", "edited while off\n");
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.equal(report.deleted, 0, JSON.stringify(report));
+	assert.match(report.errors.join("\n"), /10 of 12 files are missing/);
+	assert.equal(await b.vault.read("n00.md"), "note 0\n", "the other device keeps them");
+	assert.equal(await b.vault.read("n11.md"), "edited while off\n", "edits are still found");
+});
+
+test("deletions held back at start are sent by a sync started by hand", async (t) => {
+	const { a, b } = await vaultOf(t, 12);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	a.restart();
+	await a.sync();
+
+	const quiet = await a.sync(); // the timer's next pass
+	assert.deepEqual(quiet.errors, [], "said once, not every minute");
+	assert.equal(quiet.deleted, 0);
+
+	const byHand = await a.engine.sync(true);
+	assert.equal(byHand.deleted, 10, JSON.stringify(byHand));
+	await b.sync();
+	assert.equal(await b.vault.exists("n00.md"), false);
+	assert.equal(await b.vault.read("n10.md"), "note 10\n");
+});
+
+test("the warning comes first even when the first pass is started by hand", async (t) => {
+	const { a } = await vaultOf(t, 12);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	a.restart();
+	const first = await a.engine.sync(true);
+	assert.equal(first.deleted, 0, JSON.stringify(first));
+	assert.match(first.errors.join("\n"), /10 of 12 files are missing/);
+	const second = await a.engine.sync(true);
+	assert.equal(second.deleted, 10, JSON.stringify(second));
+});
+
+test("a file that cannot be read at start does not hold back the others", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "v1\n");
+	await a.edit("y.md", "v1\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.write("x.md", "v2, but the file is a cloud placeholder now\n");
+	await a.vault.write("y.md", "v2\n");
+	const readBinary = a.vault.adapter.readBinary;
+	a.vault.adapter.readBinary = (p) => (p === "x.md" ? Promise.reject(new Error("EIO")) : readBinary(p));
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.match(report.errors.join("\n"), /x\.md: EIO/);
+	assert.equal(await b.vault.read("y.md"), "v2\n");
+	assert.equal(await b.vault.read("x.md"), "v1\n");
+	assert.deepEqual((await a.sync()).errors, [], "the next pass goes on as usual");
+});
+
+test("a start reads only the files whose time or size changed", async (t) => {
+	const { a, b } = await vaultOf(t, 12);
+	a.restart();
+	await a.sync(); // the first start after the upgrade reads every file once
+
+	const read = [];
+	const readBinary = a.vault.adapter.readBinary;
+	a.vault.adapter.readBinary = (p) => {
+		read.push(p);
+		return readBinary(p);
+	};
+	await a.vault.write("n03.md", "edited while off\n");
+	a.restart();
+	await a.sync();
+	assert.deepEqual(read.filter((p) => !p.startsWith(".index")), ["n03.md", "n03.md"], "the scan, then the upload");
+	await b.sync();
+	assert.equal(await b.vault.read("n03.md"), "edited while off\n");
+});
+
+test("a few files missing in a large vault are deleted without asking", async (t) => {
+	const { a, b } = await vaultOf(t, 25);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	a.restart();
+	const report = await a.sync();
+	assert.equal(report.deleted, 10, JSON.stringify(report));
+	await b.sync();
+	assert.equal(await b.vault.exists("n09.md"), false);
+});
+
 test("unloading the plugin stops a running pass, and the next one finishes the job", async (t) => {
 	// A pass is a chain of awaits and unloading does not cancel it. The old copy of
 	// an updated plugin kept uploading for two minutes beside its replacement,
@@ -1262,6 +1472,53 @@ test("encryption can be turned on for a vault that is already on the server", as
 	await a.sync();
 	await b.sync();
 	assert.equal(await b.vault.exists("notes/plan.md"), false);
+});
+
+// A device that excludes a path neither holds the file there nor wants it, so it
+// can neither seal it nor erase it: erasing would take the other devices' only copy
+// on the server with it. Encryption has to start from a device without that exclude.
+async function excludedOnPhone(t) {
+	const pair = await plainPair(t);
+	const { a, b } = pair;
+	a.settings.excludes.push("secret/");
+	await b.edit("secret/plan.md", "only on the phone\n");
+	await b.edit("n.md", "shared\n");
+	await b.sync();
+	await a.sync();
+	assert.equal(await a.vault.exists("secret/plan.md"), false, "the desktop never takes the excluded file");
+	return pair;
+}
+
+test("a device that excludes files on the server finds them before any key is set", async (t) => {
+	const { a, b } = await excludedOnPhone(t);
+	const { plain } = a.clients(null);
+	assert.deepEqual(await a.engine.excludedOnServer(plain), ["secret/plan.md"]);
+	assert.deepEqual(await b.engine.excludedOnServer(b.clients(null).plain), [], "the phone excludes nothing");
+	assert.equal(await plain.getVaultKey(), null, "looking sets nothing");
+});
+
+test("encryption stops before touching anything when this device excludes files on the server", async (t) => {
+	const { server, a } = await excludedOnPhone(t);
+	const { cipher, params } = await VaultCipher.create("pass");
+	const paths = await cipher.pathCipher();
+	const { plain, sealed } = a.clients(paths);
+	await plain.putVaultKey(params);
+	const before = (await server.rawChanges(server.tokens.a)).entries;
+
+	await assert.rejects(a.engine.encryptInPlace({ plain, sealed, cipher, paths }), /secret\/plan\.md/);
+	assert.deepEqual((await server.rawChanges(server.tokens.a)).entries, before, "nothing pulled, sealed or erased");
+	// The key is set and cannot be unset, so the migration stays open and the other
+	// devices keep waiting rather than join a vault that is half readable.
+	assert.equal((await plain.getVaultKey()).migration?.device, "desktop");
+
+	// Without the exclude the same device finishes the job, the phone's file included.
+	a.settings.excludes.length = 0;
+	const report = await a.engine.encryptInPlace({ plain, sealed, cipher, paths });
+	assert.equal(report.erased, 2);
+	const live = (await server.rawChanges(server.tokens.a)).entries.filter((e) => !e.deleted);
+	const names = await Promise.all(live.map((e) => paths.decrypt(e.path)));
+	assert.deepEqual(names.sort(), ["n.md", "secret/plan.md"]);
+	assert.equal(await a.vault.read("secret/plan.md"), "only on the phone\n");
 });
 
 test("an interrupted encryption finishes where it stopped, and nobody else writes meanwhile", async (t) => {

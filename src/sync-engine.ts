@@ -24,6 +24,12 @@ import type { SyncSettings } from "./settings";
 /** Text large enough that merging it line by line stops being sensible. */
 const MERGE_SIZE_LIMIT = 1024 * 1024;
 
+/**
+ * How many files found missing at start, and at least half of those checked, make
+ * the start-up scan hold their deletions back. See scanDisk.
+ */
+const MASS_MISSING_MIN = 10;
+
 export interface SyncReport {
 	downloaded: number;
 	uploaded: number;
@@ -118,6 +124,20 @@ export interface EngineDeps {
 	log: (message: string, error?: unknown) => void;
 }
 
+/** Encryption refused: these server files are excluded on this device. */
+export class ExcludedOnServer extends Error {
+	constructor(readonly paths: string[]) {
+		super(`excluded on this device but kept on the server: ${listPaths(paths)}`);
+		this.name = "ExcludedOnServer";
+	}
+}
+
+/** The first few paths and how many more, for a message that has to stay readable. */
+export function listPaths(paths: string[], shown = 5): string {
+	const head = paths.slice(0, shown).join(", ");
+	return paths.length > shown ? `${head} and ${paths.length - shown} more` : head;
+}
+
 export class SyncEngine {
 	/** Paths this plugin is writing right now, so its own writes do not look like edits. */
 	private suppressed = new Set<string>();
@@ -131,6 +151,10 @@ export class SyncEngine {
 	phase: "idle" | "pull" | "push" | "encrypt" = "idle";
 	private running = false;
 	private queued = false;
+	/** Whether this engine has looked for changes made while nobody was watching. */
+	private scanned = false;
+	/** Deletions that scan found but did not send, waiting for a pass started by hand. */
+	private heldDeletions = false;
 
 	constructor(private deps: EngineDeps) {}
 
@@ -277,6 +301,29 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Files on the server under paths this device excludes, read through a client
+	 * without a path key.
+	 *
+	 * Encryption cannot start from a device that has any: it can neither seal a file
+	 * it does not hold nor erase one it does not want, since the readable copy is the
+	 * other devices' only one on the server. Asked before the vault key is set,
+	 * because a key once set cannot be taken back.
+	 */
+	async excludedOnServer(plain: SyncClient): Promise<string[]> {
+		const found: string[] = [];
+		for (let since = 0; ; ) {
+			const page = await plain.changes(since, 500);
+			for (const entry of page.entries) {
+				const path = toNFC(entry.path);
+				if (!entry.deleted && !entry.folder && this.isExcluded(path)) found.push(path);
+			}
+			since = page.next_seq;
+			if (!page.has_more) break;
+		}
+		return found.sort();
+	}
+
+	/**
 	 * One full pass: take what the server has, then send what we have.
 	 *
 	 * Pull runs first on purpose. Uploading against a stale revision only produces
@@ -309,6 +356,9 @@ export class SyncEngine {
 			if (!client) return report;
 			await this.resetCursorIfCipherChanged();
 			this.passCipher = this.deps.cipher();
+			// A pass started by hand after the warning was given is the answer to it.
+			const confirmed = manual && this.heldDeletions;
+			if (!this.scanned || confirmed) await this.scanDisk(report, confirmed);
 			// Renames go to the server before anything is read from it. A pass used to
 			// start by pulling, and at that moment the server still believed the old
 			// paths: they were missing locally, unknown to the index, and so were
@@ -379,6 +429,17 @@ export class SyncEngine {
 				if (!page.has_more) break;
 			}
 			this.trace(`encrypt: server holds ${readable.size} readable, ${hidden.size} hidden`);
+
+			// Step 3 erases every readable copy, and this device would seal only what it
+			// holds. A file it excludes would be lost from the server. The marker stays:
+			// the key is already set, so the migration is unfinished either way, and the
+			// marker keeps the other devices waiting until it is finished from here
+			// without the exclude, or from a device that holds every file.
+			const excluded = [...readable.entries()]
+				.filter(([path, entry]) => !entry.folder && this.isExcluded(path))
+				.map(([path]) => path)
+				.sort();
+			if (excluded.length > 0) throw new ExcludedOnServer(excluded);
 
 			// 1. Pull the readable entries, exactly as a plaintext pass would.
 			this.passCipher = plaintextCipher;
@@ -963,6 +1024,78 @@ export class SyncEngine {
 		if (adopted > 0) this.trace(`adopted ${adopted} files the index had never seen`);
 	}
 
+	/**
+	 * Find the edits and deletions made while nobody was watching.
+	 *
+	 * The watcher hears only what happens while Obsidian and the plugin run. A note
+	 * edited or deleted by another app, or by a sync tool, while they were closed was
+	 * never marked as changed and stayed that way on this device forever. So the first
+	 * pass of every start compares each settled file with what the index last saw: by
+	 * its modification time and size where those were recorded, and by its content
+	 * otherwise, which on the first start after an upgrade means reading every file
+	 * once.
+	 *
+	 * Runs before anything is pulled, so an edit found here meets a server change as
+	 * a conflict rather than being overwritten by it.
+	 */
+	private async scanDisk(report: SyncReport, sendHeld: boolean): Promise<void> {
+		const adapter = this.deps.app.vault.adapter;
+		let examined = 0;
+		let changed = 0;
+		const missing: string[] = [];
+		for (const path of this.deps.index.paths()) {
+			if (this.deps.stopped()) return;
+			const entry = this.deps.index.get(path);
+			if (!entry || entry.folder || entry.dirty || this.isExcluded(path)) continue;
+			examined++;
+			try {
+				const stat = await adapter.stat(path);
+				if (stat === null) {
+					missing.push(path);
+					continue;
+				}
+				if (stat.type !== "file") continue;
+				if (entry.disk_mtime === stat.mtime && entry.disk_size === stat.size) continue;
+				const hash = await sha256(await adapter.readBinary(path));
+				// An entry from an older index may carry only the local hash.
+				const seen = entry.plain_hash || entry.local_hash;
+				if (seen && hash !== seen) {
+					this.deps.index.set(path, { ...entry, dirty: true });
+					changed++;
+					continue;
+				}
+				this.deps.index.set(path, { ...entry, disk_mtime: stat.mtime, disk_size: stat.size });
+			} catch (e) {
+				// A file that cannot be read right now (a cloud placeholder, a lock) is left
+				// as it was, and looked at again on the next start.
+				report.errors.push(`${path}: ${describe(e)}`);
+				this.deps.log(`scan ${path}`, e);
+			}
+		}
+		this.scanned = true;
+		this.heldDeletions = false;
+		// Most of the vault gone at once is more often a folder that is not there right
+		// now (an unmounted drive, cloud files evicted from the device) than somebody's
+		// decision, and sending it would delete those files on every device. Said once
+		// per start; a pass started by hand after that is the answer that sends them.
+		if (!sendHeld && missing.length >= MASS_MISSING_MIN && missing.length * 2 >= examined) {
+			this.heldDeletions = true;
+			report.errors.push(
+				`${missing.length} of ${examined} files are missing from disk. Their deletions ` +
+					"were not sent, in case the folder is only unavailable right now. If you " +
+					"deleted them, run Sync now to send the deletions.",
+			);
+			missing.length = 0;
+		}
+		// Push sends a dirty entry with no file as a deletion.
+		for (const path of missing) {
+			const entry = this.deps.index.get(path);
+			if (entry) this.deps.index.set(path, { ...entry, dirty: true });
+		}
+		changed += missing.length;
+		if (changed > 0) this.trace(`scan: ${changed} files changed while nobody was watching`);
+	}
+
 	private async flushRenames(client: SyncClient, report: SyncReport): Promise<void> {
 		// Sent as moves so the file keeps its history, instead of showing up on other
 		// devices as a deletion followed by an unfamiliar new file.
@@ -1227,6 +1360,13 @@ export class SyncEngine {
 
 		const merged = merge3(baseText, localText, serverText, this.deviceName(), "server");
 
+		if (!merged.mergeable) {
+			// Too different to line up (a note rewritten end to end). Offering a merge
+			// would only put the two whole files one after the other.
+			await this.keepBothWithoutMerging(path, localData, server, report, baseRev, false, serverDevice);
+			return;
+		}
+
 		if (merged.clean) {
 			const data = encodeText(merged.text);
 			await this.write(path, data);
@@ -1362,9 +1502,10 @@ export class SyncEngine {
 					baseText = "";
 				}
 			}
-			data = encodeText(
-				merge3(baseText, mineText, serverText, pending.device, "server").text,
-			);
+			const merged = merge3(baseText, mineText, serverText, pending.device, "server");
+			// The note may have been rewritten since the conflict was recorded.
+			if (!merged.mergeable) throw new Error("this file cannot be merged line by line");
+			data = encodeText(merged.text);
 		}
 
 		await this.write(path, data);

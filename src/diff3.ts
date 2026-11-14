@@ -14,6 +14,12 @@
 export interface MergeResult {
 	/** True when no region needed a decision that could lose text. */
 	clean: boolean;
+	/**
+	 * False when the versions differ too much to be merged line by line. The merge
+	 * was not attempted: `clean` is false and `text` holds both versions whole, one
+	 * after the other, between markers.
+	 */
+	mergeable: boolean;
 	text: string;
 	/** How many regions ended up with conflict markers. */
 	conflicts: number;
@@ -25,23 +31,64 @@ interface Match {
 }
 
 /**
- * Longest common subsequence of two line arrays, returned as index pairs.
+ * The most lines two versions may differ by (lines removed plus lines added) before
+ * a merge is not attempted.
+ *
+ * Myers keeps one row of state per step of difference, so the work grows with the
+ * square of the difference. A note rewritten end to end (line endings converted, a
+ * formatter run over it) differs in every line; merging it line by line would take
+ * gigabytes and produce one conflict the size of the file anyway. Past this bound
+ * both versions are kept whole instead. At the bound the stored trace is about
+ * 4 * MAX_EDIT^2 bytes, 16 MB.
+ */
+const MAX_EDIT = 2000;
+
+/**
+ * Longest common subsequence of two line arrays, returned as index pairs, or null
+ * when the two differ by more than MAX_EDIT lines.
  *
  * Myers' O(ND) algorithm: the work grows with the size of the difference rather
  * than the size of the file, which is the right shape here because two versions of
- * a note are usually almost identical.
+ * a note are usually almost identical. The common head and tail are matched first,
+ * so only the part in between goes through it.
  */
-function commonLines(a: string[], b: string[]): Match[] {
+function commonLines(a: string[], b: string[]): Match[] | null {
+	let head = 0;
+	while (head < a.length && head < b.length && a[head] === b[head]) head++;
+	let tail = 0;
+	while (
+		tail < a.length - head &&
+		tail < b.length - head &&
+		a[a.length - 1 - tail] === b[b.length - 1 - tail]
+	) {
+		tail++;
+	}
+
+	const matches: Match[] = [];
+	for (let i = 0; i < head; i++) matches.push({ base: i, other: i });
+	const middle = middleLines(a.slice(head, a.length - tail), b.slice(head, b.length - tail));
+	if (middle === null) return null;
+	for (const m of middle) matches.push({ base: m.base + head, other: m.other + head });
+	for (let i = tail; i > 0; i--) matches.push({ base: a.length - i, other: b.length - i });
+	return matches;
+}
+
+function middleLines(a: string[], b: string[]): Match[] | null {
 	const n = a.length;
 	const m = b.length;
+	// Nothing in common is possible, so there is nothing to search for. This is the
+	// empty base of a first sync, where both sides are compared against nothing.
+	if (n === 0 || m === 0) return [];
 	const max = n + m;
+	// trace[d] holds the furthest x reached on each diagonal k in [-d, d] before step
+	// d, at offset k + d. Storing only that window keeps the trace at O(D^2).
 	const trace: Int32Array[] = [];
-	let v = new Int32Array(2 * max + 1);
+	const v = new Int32Array(2 * max + 1);
 
 	let d = 0;
 	outer: for (; d <= max; d++) {
-		const snapshot = new Int32Array(v);
-		trace.push(snapshot);
+		if (d > MAX_EDIT) return null;
+		trace.push(v.slice(max - d, max + d + 1));
 		for (let k = -d; k <= d; k += 2) {
 			const idx = k + max;
 			let x: number;
@@ -66,15 +113,15 @@ function commonLines(a: string[], b: string[]): Match[] {
 	let y = m;
 	for (let step = Math.min(d, trace.length - 1); step > 0; step--) {
 		const prev = trace[step] as Int32Array;
+		const at = (k: number): number => prev[k + step] ?? 0;
 		const k = x - y;
-		const idx = k + max;
 		let prevK: number;
-		if (k === -step || (k !== step && (prev[idx - 1] ?? 0) < (prev[idx + 1] ?? 0))) {
+		if (k === -step || (k !== step && at(k - 1) < at(k + 1))) {
 			prevK = k + 1;
 		} else {
 			prevK = k - 1;
 		}
-		const prevX = prev[prevK + max] ?? 0;
+		const prevX = at(prevK);
 		const prevY = prevX - prevK;
 		while (x > prevX && y > prevY) {
 			x--;
@@ -94,9 +141,11 @@ function commonLines(a: string[], b: string[]): Match[] {
 }
 
 /** Which base lines a side left untouched, as a lookup from base index to side index. */
-function matchMap(base: string[], side: string[]): Map<number, number> {
+function matchMap(base: string[], side: string[]): Map<number, number> | null {
+	const common = commonLines(base, side);
+	if (common === null) return null;
 	const map = new Map<number, number>();
-	for (const m of commonLines(base, side)) map.set(m.base, m.other);
+	for (const m of common) map.set(m.base, m.other);
 	return map;
 }
 
@@ -130,12 +179,18 @@ export function merge3(
 	const a = splitLines(mine);
 	const c = splitLines(theirs);
 
-	if (mine === theirs) return { clean: true, text: mine, conflicts: 0 };
-	if (base === mine) return { clean: true, text: theirs, conflicts: 0 };
-	if (base === theirs) return { clean: true, text: mine, conflicts: 0 };
+	if (mine === theirs) return { clean: true, mergeable: true, text: mine, conflicts: 0 };
+	if (base === mine) return { clean: true, mergeable: true, text: theirs, conflicts: 0 };
+	if (base === theirs) return { clean: true, mergeable: true, text: mine, conflicts: 0 };
 
 	const inMine = matchMap(b, a);
-	const inTheirs = matchMap(b, c);
+	const inTheirs = inMine && matchMap(b, c);
+	if (inMine === null || inTheirs === null) {
+		// Too different to line up. One region spanning the whole file loses nothing.
+		const out: string[] = [];
+		emit(out, b, a, c, mineLabel, theirsLabel, () => {});
+		return { clean: false, mergeable: false, text: joinLines(out, theirs || mine), conflicts: 1 };
+	}
 
 	const out: string[] = [];
 	let conflicts = 0;
@@ -177,7 +232,7 @@ export function merge3(
 		() => conflicts++,
 	);
 
-	return { clean: conflicts === 0, text: joinLines(out, theirs || mine), conflicts };
+	return { clean: conflicts === 0, mergeable: true, text: joinLines(out, theirs || mine), conflicts };
 }
 
 /**

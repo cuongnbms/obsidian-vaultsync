@@ -103,6 +103,8 @@ const en: Dict = {
 	"encryption.migrateStopped":
 		"Encryption stopped before it finished. It continues on the next start, or press Continue encrypting.",
 	"encryption.busy": "A sync is running. Try again in a moment.",
+	"encryption.excludedOnServer":
+		"Encryption not started. This device excludes files that other devices keep on the server ({paths}), so it cannot encrypt them. Remove the exclusion, or turn encryption on from a device that has every file.",
 	"progress.encrypting": "Encrypting: {pct}% ({done} of {total})",
 	"progress.doneMigrated": "Done. Everything on the server is encrypted.",
 	"cmd.encrypt": "Encrypt everything on the server",
@@ -300,6 +302,8 @@ const ru: Dict = {
 	"encryption.migrateStopped":
 		"Шифрование остановилось, не завершившись. Продолжится при следующем запуске или по кнопке Продолжить шифрование.",
 	"encryption.busy": "Идёт синхронизация. Попробуй через минуту.",
+	"encryption.excludedOnServer":
+		"Шифрование не начато. Это устройство исключает файлы, которые другие устройства хранят на сервере ({paths}), поэтому не может их зашифровать. Убери исключение или включи шифрование с устройства, где есть все файлы.",
 	"progress.encrypting": "Шифрование: {pct}% ({done} из {total})",
 	"progress.doneMigrated": "Готово. Всё на сервере зашифровано.",
 	"cmd.encrypt": "Зашифровать всё на сервере",

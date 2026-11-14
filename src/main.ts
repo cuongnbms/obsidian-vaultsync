@@ -10,7 +10,7 @@ import { VaultCipher, WrongPassphrase, plaintext, type Cipher, type PathCipher, 
 import { t } from "./i18n";
 import { LocalIndex } from "./index-store";
 import { conflictName, defaultDeviceName, sha256, toNFC } from "./paths";
-import { SyncEngine, type SyncReport } from "./sync-engine";
+import { SyncEngine, listPaths, type SyncReport } from "./sync-engine";
 import { DEFAULT_SETTINGS, SyncSettingsTab, type SyncSettings, defaultExcludes } from "./settings";
 
 /** How long to wait after the last edit before syncing. Obsidian fires on every keystroke. */
@@ -486,6 +486,21 @@ export default class LockstepPlugin extends Plugin {
 				// brought to that state by encryptInPlace, right after the key is set.
 				const stats = await client.stats();
 				const occupied = Number(stats["files"] ?? 0) + Number(stats["folders"] ?? 0) > 0;
+				if (occupied) {
+					// Asked before the key is set, because a key cannot be taken back: a
+					// device that excludes files other devices keep cannot encrypt them,
+					// and erasing their readable copies would lose them.
+					const plain = new SyncClient(this.settings.serverUrl, this.settings.token, this.settings.deviceName, null);
+					const excluded = await this.engine.excludedOnServer(plain);
+					if (excluded.length > 0) {
+						this.cipher = plaintext;
+						this.pathCipher = null;
+						this.locked = true;
+						this.cipherStatus = t("encryption.excludedOnServer", { paths: listPaths(excluded) });
+						new Notice(`Lockstep: ${this.cipherStatus}`, 15000);
+						return;
+					}
+				}
 				const { cipher, params } = await VaultCipher.create(this.settings.passphrase);
 				this.vaultHasKey = true;
 				this.vaultHidesNames = true;
