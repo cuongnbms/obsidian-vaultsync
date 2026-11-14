@@ -8,11 +8,16 @@ are how that promise is kept rather than asserted.
 
 ## Running everything
 
+Tool versions (node, pnpm, go) are pinned in `mise.toml`.
+
 ```bash
-make server                        # the binary the integration tests need
-cd server && go test -race ./...   # data loss scenarios against a real server
-cd plugin && npm ci && npm test    # merge, encryption, and two devices end to end
+mise run setup    # install the pinned tools and dependencies
+mise run check    # types, gofmt and vet, then every test
 ```
+
+`mise run check` builds the server first, which the integration tests need, then runs
+the data loss scenarios against a real server (`test:server`) and the plugin's merge,
+encryption, and two-devices-end-to-end tests (`test:plugin`). `mise tasks` lists the rest.
 
 The plugin tests spin up a real server and drive the real engine against it with two vaults
 on disk. Only Obsidian itself is stubbed.

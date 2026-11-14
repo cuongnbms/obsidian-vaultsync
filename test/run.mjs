@@ -4,7 +4,7 @@
 // package.json. Process isolation is the test runner's default from node 24 and
 // hangs this harness on some filesystems (each test spawns a server child), so it
 // is turned off where the flag exists. Node 20-23 have no isolation default and
-// reject the flag outright, so they get nothing. One npm script, every node.
+// reject the flag outright, so they get nothing. One package script, every node.
 import { readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 

@@ -13,7 +13,7 @@ cross:
 # The plugin lives in the repository root, where Obsidian, BRAT and the catalogue
 # look for manifest.json and main.js.
 plugin:
-	npm run build
+	pnpm run build
 
 # Release assets: these three files are what BRAT and the catalogue expect.
 release: plugin
@@ -21,7 +21,7 @@ release: plugin
 
 test:
 	cd server && go test ./...
-	npm run check
+	pnpm run check
 
 fmt:
 	cd server && gofmt -w .
