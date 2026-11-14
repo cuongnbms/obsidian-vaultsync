@@ -5,7 +5,7 @@ import { ApiError, ConflictError, SyncClient, type ChangeEntry } from "./api";
 
 export { SyncClient } from "./api";
 import { merge3 } from "./diff3";
-import type { DeferredChange, LocalIndex } from "./index-store";
+import type { DeferredChange, LocalIndex, PendingRename } from "./index-store";
 import { conflictName, defaultDeviceName, sha256, toNFC } from "./paths";
 import { plaintext as plaintextCipher, type Cipher, type PathCipher } from "./crypto";
 import type { SyncSettings } from "./settings";
@@ -984,11 +984,50 @@ export class SyncEngine {
 				this.deps.index.remove(rename.from);
 				report.renamed++;
 			} catch (e) {
-				// A conflicting or impossible move degrades to an ordinary upload of the
-				// new path. Nothing is lost, the file just arrives without its history.
+				// Any failed move, refused or lost on the way, degrades to a deletion of
+				// the old path and an upload of the new one. The file arrives without its
+				// history, and nothing is lost.
 				this.deps.index.clearRename(rename);
+				this.dropRename(rename);
 				this.deps.log(`rename ${rename.from} -> ${rename.to}`, e);
 			}
+		}
+	}
+
+	/**
+	 * Undoes what queueing the rename did to the index. The new path took over the
+	 * old one's entry, revision included, and kept it: its upload was then refused
+	 * against a path the server had never seen, and the merge that followed asked for
+	 * that revision and got a 404, every pass, forever (a clean file was never even
+	 * tried). The old path had no entry left, so its deletion never went up either.
+	 */
+	private dropRename(rename: PendingRename): void {
+		const moved = this.deps.index.get(rename.to);
+		// A folder holds no content to upload, and its files travel as moves of their
+		// own. Sending the old folder's deletion would only bring it back, empty, as a
+		// folder tombstone every device recreates.
+		if (moved?.folder) return;
+		if (moved) {
+			// New to the server, like a file the index has just adopted. No plaintext
+			// hash: push would find it equal to the disk and mark the file sent.
+			this.deps.index.set(rename.to, {
+				base_rev: 0,
+				base_hash: "",
+				local_hash: "",
+				mtime: Date.now(),
+				dirty: true,
+			});
+		}
+		// The old path goes back as deleted here and not yet sent. If the server's copy
+		// was edited meanwhile, the deletion is refused and the edit comes back.
+		if (!this.deps.index.get(rename.from)) {
+			this.deps.index.set(rename.from, {
+				base_rev: rename.base_rev,
+				base_hash: "",
+				local_hash: "",
+				mtime: Date.now(),
+				dirty: true,
+			});
 		}
 	}
 
