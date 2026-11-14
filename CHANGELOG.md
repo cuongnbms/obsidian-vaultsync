@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+A note edited or deleted while Obsidian or the plugin was closed, by another app or
+another sync tool, never synced: only the file watcher marked changes, and it only
+runs while the plugin does. The first sync after each start now compares every
+synced file with what the plugin last saw, by modification time and size, and by
+content where those differ, and sends what changed. The first start after updating
+reads every file once to record those times. When ten or more files, and at least
+half of the vault, are missing at once, the deletions are not sent, since a folder
+that is unavailable for the moment is likelier than a decision; the plugin says so
+once, and Sync now sends them.
+
+Turning encryption on from a device that excludes some paths erased the other
+devices' files under those paths from the server for good: the device neither
+pulled nor re-uploaded them, then deleted every readable copy. Such a device now
+refuses to start, before the vault key is set, and names the files; encryption is
+turned on from a device without the exclusion instead.
+
+Merging a long note that changed throughout, such as one whose line endings were
+converted, could take gigabytes of memory: 3 GB and 13 seconds for 10,000 lines.
+Notes that differ in more than 2,000 lines are no longer merged line by line; both
+versions are kept, as for any conflict that cannot be merged, and the same note now
+takes under 100 MB. Only the plugin changed.
+
 ## 1.0.10
 
 A file created again at a path that had been deleted never reached the server, and
