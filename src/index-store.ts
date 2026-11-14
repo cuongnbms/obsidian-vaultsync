@@ -26,7 +26,15 @@ export interface IndexEntry {
 	 */
 	plain_hash?: string;
 	local_hash: string;
+	/** Server time of the revision, or when this device wrote it. Not the disk's. */
 	mtime: number;
+	/**
+	 * The file's modification time and size on disk when its content was last seen
+	 * to equal plain_hash. While both still match, the start-up scan trusts the file
+	 * without reading it. Absent until the first scan.
+	 */
+	disk_mtime?: number;
+	disk_size?: number;
 	folder?: boolean;
 	dirty?: boolean;
 }

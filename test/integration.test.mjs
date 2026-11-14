@@ -1185,6 +1185,171 @@ test("a vault that existed before the plugin is uploaded on its first sync", asy
 	assert.equal(again.uploaded, 0);
 });
 
+// --- changes made while nobody was watching --------------------------------------
+// The watcher only hears about changes while Obsidian and the plugin are running.
+// A note edited by another app, or by a sync tool, while the plugin was off used to
+// stay on this device forever. vault.write and vault.remove below bypass the
+// watcher the same way.
+
+test("a note edited while the plugin was off is sent on the next start", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "v1\n");
+	await a.edit("y.md", "untouched\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.write("x.md", "v2, written by another app\n");
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.equal(report.uploaded, 1, JSON.stringify(report));
+	assert.equal(await b.vault.read("x.md"), "v2, written by another app\n");
+	assert.equal(await b.vault.read("y.md"), "untouched\n");
+});
+
+test("a note deleted while the plugin was off is deleted everywhere on the next start", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "keep\n");
+	await a.edit("y.md", "delete me\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.remove("y.md");
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.equal(report.deleted, 1, JSON.stringify(report));
+	assert.equal(await b.vault.exists("y.md"), false);
+	assert.equal(await b.vault.read("x.md"), "keep\n");
+});
+
+test("a note deleted while off and edited elsewhere comes back with the edit", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "v1\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.remove("x.md");
+	await b.edit("x.md", "v2 from the phone\n");
+	await b.sync();
+	a.restart();
+	await a.sync();
+	await a.sync();
+	await b.sync();
+
+	assert.equal(await a.vault.read("x.md"), "v2 from the phone\n");
+	assert.equal(await b.vault.read("x.md"), "v2 from the phone\n");
+});
+
+// Most of a vault gone at once is more often a folder that is not there right now
+// (an unmounted drive, cloud files evicted from the device) than a decision.
+async function vaultOf(t, count) {
+	const pair = await twoDevices();
+	t.after(pair.cleanup);
+	for (let i = 0; i < count; i++) await pair.a.edit(`n${String(i).padStart(2, "0")}.md`, `note ${i}\n`);
+	await pair.a.sync();
+	await pair.b.sync();
+	return pair;
+}
+
+test("most of the vault missing at start does not delete it everywhere", async (t) => {
+	const { a, b } = await vaultOf(t, 12);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	await a.vault.write("n11.md", "edited while off\n");
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.equal(report.deleted, 0, JSON.stringify(report));
+	assert.match(report.errors.join("\n"), /10 of 12 files are missing/);
+	assert.equal(await b.vault.read("n00.md"), "note 0\n", "the other device keeps them");
+	assert.equal(await b.vault.read("n11.md"), "edited while off\n", "edits are still found");
+});
+
+test("deletions held back at start are sent by a sync started by hand", async (t) => {
+	const { a, b } = await vaultOf(t, 12);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	a.restart();
+	await a.sync();
+
+	const quiet = await a.sync(); // the timer's next pass
+	assert.deepEqual(quiet.errors, [], "said once, not every minute");
+	assert.equal(quiet.deleted, 0);
+
+	const byHand = await a.engine.sync(true);
+	assert.equal(byHand.deleted, 10, JSON.stringify(byHand));
+	await b.sync();
+	assert.equal(await b.vault.exists("n00.md"), false);
+	assert.equal(await b.vault.read("n10.md"), "note 10\n");
+});
+
+test("the warning comes first even when the first pass is started by hand", async (t) => {
+	const { a } = await vaultOf(t, 12);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	a.restart();
+	const first = await a.engine.sync(true);
+	assert.equal(first.deleted, 0, JSON.stringify(first));
+	assert.match(first.errors.join("\n"), /10 of 12 files are missing/);
+	const second = await a.engine.sync(true);
+	assert.equal(second.deleted, 10, JSON.stringify(second));
+});
+
+test("a file that cannot be read at start does not hold back the others", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("x.md", "v1\n");
+	await a.edit("y.md", "v1\n");
+	await a.sync();
+	await b.sync();
+
+	await a.vault.write("x.md", "v2, but the file is a cloud placeholder now\n");
+	await a.vault.write("y.md", "v2\n");
+	const readBinary = a.vault.adapter.readBinary;
+	a.vault.adapter.readBinary = (p) => (p === "x.md" ? Promise.reject(new Error("EIO")) : readBinary(p));
+	a.restart();
+	const report = await a.sync();
+	await b.sync();
+
+	assert.match(report.errors.join("\n"), /x\.md: EIO/);
+	assert.equal(await b.vault.read("y.md"), "v2\n");
+	assert.equal(await b.vault.read("x.md"), "v1\n");
+	assert.deepEqual((await a.sync()).errors, [], "the next pass goes on as usual");
+});
+
+test("a start reads only the files whose time or size changed", async (t) => {
+	const { a, b } = await vaultOf(t, 12);
+	a.restart();
+	await a.sync(); // the first start after the upgrade reads every file once
+
+	const read = [];
+	const readBinary = a.vault.adapter.readBinary;
+	a.vault.adapter.readBinary = (p) => {
+		read.push(p);
+		return readBinary(p);
+	};
+	await a.vault.write("n03.md", "edited while off\n");
+	a.restart();
+	await a.sync();
+	assert.deepEqual(read.filter((p) => !p.startsWith(".index")), ["n03.md", "n03.md"], "the scan, then the upload");
+	await b.sync();
+	assert.equal(await b.vault.read("n03.md"), "edited while off\n");
+});
+
+test("a few files missing in a large vault are deleted without asking", async (t) => {
+	const { a, b } = await vaultOf(t, 25);
+	for (let i = 0; i < 10; i++) await a.vault.remove(`n${String(i).padStart(2, "0")}.md`);
+	a.restart();
+	const report = await a.sync();
+	assert.equal(report.deleted, 10, JSON.stringify(report));
+	await b.sync();
+	assert.equal(await b.vault.exists("n09.md"), false);
+});
+
 test("unloading the plugin stops a running pass, and the next one finishes the job", async (t) => {
 	// A pass is a chain of awaits and unloading does not cancel it. The old copy of
 	// an updated plugin kept uploading for two minutes beside its replacement,

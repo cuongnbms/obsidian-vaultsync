@@ -25,7 +25,23 @@ export class FakeVault {
 			rename: (from, to) => this.rename(from, to),
 			list: (p) => this.list(p),
 			rmdir: (p, recursive) => this.rmdir(p, recursive),
+			stat: (p) => this.stat(p),
 		};
+	}
+
+	/** Obsidian's Stat, or null when nothing is there. */
+	async stat(p) {
+		try {
+			const s = await fs.stat(this.full(p));
+			return {
+				type: s.isDirectory() ? "folder" : "file",
+				ctime: Math.round(s.birthtimeMs),
+				mtime: Math.round(s.mtimeMs),
+				size: s.size,
+			};
+		} catch {
+			return null;
+		}
 	}
 
 	full(p) {

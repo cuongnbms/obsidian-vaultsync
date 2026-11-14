@@ -126,7 +126,7 @@ export async function makeDevice(server, name, token, options = {}) {
 	let cipher = options.cipher ?? { enabled: false, encrypt: async (d) => d, decrypt: async (d) => d };
 	let pathCipher = options.pathCipher ?? null;
 
-	const engine = new SyncEngine({
+	const build = () => new SyncEngine({
 		app: { vault },
 		index,
 		settings,
@@ -146,12 +146,15 @@ export async function makeDevice(server, name, token, options = {}) {
 		log: (message, error) => logs.push(`${message}: ${error ?? ""}`),
 		trace: (line) => logs.push(`[${name}] ${line}`),
 	});
+	let engine = build();
 
 	return {
 		name,
 		vault,
 		index,
-		engine,
+		get engine() {
+			return engine;
+		},
 		settings,
 		conflicts,
 		logs,
@@ -204,6 +207,10 @@ export async function makeDevice(server, name, token, options = {}) {
 		},
 		async sync() {
 			return engine.sync();
+		},
+		/** Obsidian closed and opened again: a new engine over the same vault and index. */
+		restart() {
+			engine = build();
 		},
 		async cleanup() {
 			await fs.rm(root, { recursive: true, force: true });
