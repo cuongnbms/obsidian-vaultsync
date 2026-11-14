@@ -381,6 +381,197 @@ test("a rename on one device and an edit on the other lose nothing", async (t) =
 	);
 });
 
+// A rename the server refuses, or never hears about, is dropped and the file goes up
+// as a new one under its new name. The destination used to keep the source's
+// revision: its upload was refused against a path the server had never seen, the
+// merge then asked for that path and got a 404, on every pass, forever.
+async function renameThatFails(t) {
+	const net = { down: false, renameFails: false };
+	const server = await startServer();
+	const a = await makeDevice(server, "mac", server.tokens.a, {
+		wrapClient: (c) =>
+			new Proxy(c, {
+				get(o, k) {
+					const v = o[k];
+					if (typeof v !== "function") return v;
+					return (...args) => {
+						if (net.down || (k === "rename" && net.renameFails)) {
+							if (k === "rename") net.renameFails = false;
+							return Promise.reject(new TypeError("Failed to fetch"));
+						}
+						return v.apply(o, args);
+					};
+				},
+			}),
+	});
+	const b = await makeDevice(server, "iphone", server.tokens.b);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+	return { a, b, net };
+}
+
+async function syncCleanly(device) {
+	const report = await device.sync();
+	assert.deepEqual(report.errors, [], `${device.settings.deviceName}: ${JSON.stringify(report)}`);
+	return report;
+}
+
+async function newNameKeepsSyncing(a, b) {
+	await a.edit("new.md", "body, edited after the rename\n");
+	await syncCleanly(a);
+	await syncCleanly(a);
+	await syncCleanly(b);
+	assert.equal(await b.vault.read("new.md"), "body, edited after the rename\n");
+}
+
+for (const settled of [false, true]) {
+	test(`a rename lost on the network still arrives (synced ${settled ? "twice" : "once"} first)`, async (t) => {
+		const { a, b, net } = await renameThatFails(t);
+		await a.edit("old.md", "body\n");
+		await a.sync();
+		if (settled) await a.sync();
+		await b.sync();
+
+		await a.rename("old.md", "new.md");
+		net.renameFails = true;
+		await a.sync();
+		await syncCleanly(a);
+		await syncCleanly(b);
+
+		assert.equal(await b.vault.read("new.md"), "body\n");
+		assert.equal(await b.vault.exists("old.md"), false, "the old name is gone on the other device");
+		assert.equal(await a.vault.exists("old.md"), false, "and does not come back here");
+		await newNameKeepsSyncing(a, b);
+	});
+}
+
+test("a rename the server applied but whose answer was lost still arrives once", async (t) => {
+	const server = await startServer();
+	let lose = false;
+	const a = await makeDevice(server, "mac", server.tokens.a, {
+		wrapClient: (c) =>
+			Object.assign(Object.create(c), {
+				async rename(...args) {
+					const res = await c.rename(...args);
+					if (lose) {
+						lose = false;
+						throw new TypeError("Failed to fetch");
+					}
+					return res;
+				},
+			}),
+	});
+	const b = await makeDevice(server, "iphone", server.tokens.b);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+	await a.edit("old.md", "body\n");
+	await a.sync();
+	await b.sync();
+
+	await a.rename("old.md", "new.md");
+	lose = true;
+	await a.sync();
+	await syncCleanly(a);
+	await syncCleanly(b);
+	await syncCleanly(b);
+	await syncCleanly(a);
+
+	const files = async (d) => Object.keys(await d.vault.snapshot()).sort();
+	assert.deepEqual(await files(a), ["new.md"], "no duplicate or conflict copy here");
+	assert.deepEqual(await files(b), ["new.md"], "nor on the other device");
+	assert.equal(await b.vault.read("new.md"), "body\n");
+	await newNameKeepsSyncing(a, b);
+});
+
+test("a folder rename that fails does not bring the old folder back", async (t) => {
+	const { a, b, net } = await renameThatFails(t);
+	// Folders reach the index only from the server, written there as folders.
+	await b.clients(null).plain.putFolder("Empty", 0);
+	await a.sync();
+	assert.equal(await a.vault.exists("Empty"), true);
+
+	await a.rename("Empty", "Blank");
+	net.down = true;
+	await a.sync().catch(() => {});
+	net.down = false;
+	await syncCleanly(a);
+	await syncCleanly(b);
+	await syncCleanly(a);
+
+	assert.equal(await a.vault.exists("Empty"), false, "the renamed folder came back");
+	assert.equal(await a.vault.exists("Blank"), true);
+});
+
+test("a rename made while the server is unreachable still arrives", async (t) => {
+	const { a, b, net } = await renameThatFails(t);
+	await a.edit("old.md", "body\n");
+	await a.sync();
+	await b.sync();
+
+	await a.rename("old.md", "new.md");
+	net.down = true;
+	await a.sync().catch(() => {});
+	net.down = false;
+	await syncCleanly(a);
+	await syncCleanly(a);
+	await syncCleanly(b);
+
+	assert.equal(await b.vault.read("new.md"), "body\n");
+	assert.equal(await b.vault.exists("old.md"), false);
+	assert.equal(await a.vault.exists("old.md"), false);
+	await newNameKeepsSyncing(a, b);
+});
+
+test("a rename refused because the other device edited the old name loses nothing", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("old.md", "body\n");
+	await a.sync();
+	await b.sync();
+	await b.edit("old.md", "body, edited on the phone\n");
+	await b.sync();
+
+	await a.rename("old.md", "new.md");
+	await a.sync();
+	await syncCleanly(a);
+	await syncCleanly(b);
+	await syncCleanly(b);
+
+	assert.equal(await b.vault.read("new.md"), "body\n");
+	const everywhere = Object.values({ ...(await a.vault.snapshot()), ...(await b.vault.snapshot()) });
+	assert.ok(
+		everywhere.some((text) => text.includes("body, edited on the phone")),
+		"an edit beats the deletion the rename implied",
+	);
+	await newNameKeepsSyncing(a, b);
+});
+
+test("a rename refused because the other device deleted the old name still arrives", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("old.md", "body\n");
+	await a.sync();
+	await b.sync();
+	await b.delete("old.md");
+	await b.sync();
+
+	await a.rename("old.md", "new.md");
+	await a.sync();
+	await syncCleanly(a);
+	await syncCleanly(b);
+
+	assert.equal(await b.vault.read("new.md"), "body\n");
+	assert.equal(await b.vault.exists("old.md"), false);
+	assert.equal(await a.vault.exists("old.md"), false);
+	await newNameKeepsSyncing(a, b);
+});
+
 test("two devices creating the same path from nothing keep both texts", async (t) => {
 	const { a, b, cleanup } = await twoDevices();
 	t.after(cleanup);
