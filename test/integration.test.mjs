@@ -1309,6 +1309,53 @@ test("encryption can be turned on for a vault that is already on the server", as
 	assert.equal(await b.vault.exists("notes/plan.md"), false);
 });
 
+// A device that excludes a path neither holds the file there nor wants it, so it
+// can neither seal it nor erase it: erasing would take the other devices' only copy
+// on the server with it. Encryption has to start from a device without that exclude.
+async function excludedOnPhone(t) {
+	const pair = await plainPair(t);
+	const { a, b } = pair;
+	a.settings.excludes.push("secret/");
+	await b.edit("secret/plan.md", "only on the phone\n");
+	await b.edit("n.md", "shared\n");
+	await b.sync();
+	await a.sync();
+	assert.equal(await a.vault.exists("secret/plan.md"), false, "the desktop never takes the excluded file");
+	return pair;
+}
+
+test("a device that excludes files on the server finds them before any key is set", async (t) => {
+	const { a, b } = await excludedOnPhone(t);
+	const { plain } = a.clients(null);
+	assert.deepEqual(await a.engine.excludedOnServer(plain), ["secret/plan.md"]);
+	assert.deepEqual(await b.engine.excludedOnServer(b.clients(null).plain), [], "the phone excludes nothing");
+	assert.equal(await plain.getVaultKey(), null, "looking sets nothing");
+});
+
+test("encryption stops before touching anything when this device excludes files on the server", async (t) => {
+	const { server, a } = await excludedOnPhone(t);
+	const { cipher, params } = await VaultCipher.create("pass");
+	const paths = await cipher.pathCipher();
+	const { plain, sealed } = a.clients(paths);
+	await plain.putVaultKey(params);
+	const before = (await server.rawChanges(server.tokens.a)).entries;
+
+	await assert.rejects(a.engine.encryptInPlace({ plain, sealed, cipher, paths }), /secret\/plan\.md/);
+	assert.deepEqual((await server.rawChanges(server.tokens.a)).entries, before, "nothing pulled, sealed or erased");
+	// The key is set and cannot be unset, so the migration stays open and the other
+	// devices keep waiting rather than join a vault that is half readable.
+	assert.equal((await plain.getVaultKey()).migration?.device, "desktop");
+
+	// Without the exclude the same device finishes the job, the phone's file included.
+	a.settings.excludes.length = 0;
+	const report = await a.engine.encryptInPlace({ plain, sealed, cipher, paths });
+	assert.equal(report.erased, 2);
+	const live = (await server.rawChanges(server.tokens.a)).entries.filter((e) => !e.deleted);
+	const names = await Promise.all(live.map((e) => paths.decrypt(e.path)));
+	assert.deepEqual(names.sort(), ["n.md", "secret/plan.md"]);
+	assert.equal(await a.vault.read("secret/plan.md"), "only on the phone\n");
+});
+
 test("an interrupted encryption finishes where it stopped, and nobody else writes meanwhile", async (t) => {
 	const { server, a, b } = await plainPair(t);
 	for (let i = 1; i <= 6; i++) await a.edit(`n${i}.md`, `note ${i}\n`);

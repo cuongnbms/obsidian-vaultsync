@@ -118,6 +118,20 @@ export interface EngineDeps {
 	log: (message: string, error?: unknown) => void;
 }
 
+/** Encryption refused: these server files are excluded on this device. */
+export class ExcludedOnServer extends Error {
+	constructor(readonly paths: string[]) {
+		super(`excluded on this device but kept on the server: ${listPaths(paths)}`);
+		this.name = "ExcludedOnServer";
+	}
+}
+
+/** The first few paths and how many more, for a message that has to stay readable. */
+export function listPaths(paths: string[], shown = 5): string {
+	const head = paths.slice(0, shown).join(", ");
+	return paths.length > shown ? `${head} and ${paths.length - shown} more` : head;
+}
+
 export class SyncEngine {
 	/** Paths this plugin is writing right now, so its own writes do not look like edits. */
 	private suppressed = new Set<string>();
@@ -277,6 +291,29 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Files on the server under paths this device excludes, read through a client
+	 * without a path key.
+	 *
+	 * Encryption cannot start from a device that has any: it can neither seal a file
+	 * it does not hold nor erase one it does not want, since the readable copy is the
+	 * other devices' only one on the server. Asked before the vault key is set,
+	 * because a key once set cannot be taken back.
+	 */
+	async excludedOnServer(plain: SyncClient): Promise<string[]> {
+		const found: string[] = [];
+		for (let since = 0; ; ) {
+			const page = await plain.changes(since, 500);
+			for (const entry of page.entries) {
+				const path = toNFC(entry.path);
+				if (!entry.deleted && !entry.folder && this.isExcluded(path)) found.push(path);
+			}
+			since = page.next_seq;
+			if (!page.has_more) break;
+		}
+		return found.sort();
+	}
+
+	/**
 	 * One full pass: take what the server has, then send what we have.
 	 *
 	 * Pull runs first on purpose. Uploading against a stale revision only produces
@@ -379,6 +416,17 @@ export class SyncEngine {
 				if (!page.has_more) break;
 			}
 			this.trace(`encrypt: server holds ${readable.size} readable, ${hidden.size} hidden`);
+
+			// Step 3 erases every readable copy, and this device would seal only what it
+			// holds. A file it excludes would be lost from the server. The marker stays:
+			// the key is already set, so the migration is unfinished either way, and the
+			// marker keeps the other devices waiting until it is finished from here
+			// without the exclude, or from a device that holds every file.
+			const excluded = [...readable.entries()]
+				.filter(([path, entry]) => !entry.folder && this.isExcluded(path))
+				.map(([path]) => path)
+				.sort();
+			if (excluded.length > 0) throw new ExcludedOnServer(excluded);
 
 			// 1. Pull the readable entries, exactly as a plaintext pass would.
 			this.passCipher = plaintextCipher;
