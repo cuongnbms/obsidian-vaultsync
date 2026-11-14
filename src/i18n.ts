@@ -175,6 +175,7 @@ const en: Dict = {
 	"cmd.sync": "Sync now",
 
 	"notice.syncing": "Lockstep: syncing…",
+	"notice.syncQueued": "Lockstep: busy right now. Will sync as soon as it is done.",
 	"notice.syncDone": "Lockstep: {summary}",
 
 	"status.syncing": "syncing…",
@@ -374,6 +375,7 @@ const ru: Dict = {
 	"cmd.sync": "Синхронизировать сейчас",
 
 	"notice.syncing": "Lockstep: синхронизирую…",
+	"notice.syncQueued": "Lockstep: сейчас занят. Синхронизирую, как только закончу.",
 	"notice.syncDone": "Lockstep: {summary}",
 
 	"status.syncing": "синхронизирую…",

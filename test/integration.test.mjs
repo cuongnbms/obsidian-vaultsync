@@ -2063,3 +2063,42 @@ test("download everything waits for a running pass instead of interleaving with 
 	await pulling;
 	assert.equal(await b.vault.read("note.md"), "from the server\n");
 });
+
+// "Sync now" pressed while the engine is busy is not dropped: the request is
+// remembered, and the plugin schedules a pass once the holder is done.
+test("a sync asked for during a pass is remembered once, and the next pass runs", async (t) => {
+	const server = await startServer();
+	const a = await makeDevice(server, "mac", server.tokens.a);
+	const b = await deviceWithHeldPass(server, "iphone", server.tokens.b);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	const { pass, release } = await b.startHeldPass();
+	const asked = await b.engine.sync(true);
+	assert.deepEqual(asked.errors, []);
+	assert.equal(asked.downloaded, 0, "the request does not run alongside the pass");
+	await a.edit("late.md", "written during the pass\n");
+	await a.sync();
+
+	release();
+	await pass;
+	assert.equal(b.engine.takeQueued(), true);
+	assert.equal(b.engine.takeQueued(), false, "taken once");
+	await b.sync();
+	assert.equal(await b.vault.read("late.md"), "written during the pass\n");
+});
+
+test("a sync asked for while something else holds the engine is remembered", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+	await a.edit("note.md", "text\n");
+	await a.sync();
+
+	const pulling = b.engine.pullAll();
+	await b.engine.sync(true);
+	await pulling;
+	assert.equal(b.engine.takeQueued(), true);
+});

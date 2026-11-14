@@ -662,7 +662,7 @@ export class SyncEngine {
 		return changed;
 	}
 
-	/** True when another change arrived while the last pass was running. */
+	/** True, once, when a pass was asked for while the engine was busy. */
 	takeQueued(): boolean {
 		const q = this.queued;
 		this.queued = false;
