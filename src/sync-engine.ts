@@ -149,7 +149,15 @@ export class SyncEngine {
 	private passCipher: Cipher | null = null;
 	/** Which half of a pass is running, for progress wording. */
 	phase: "idle" | "pull" | "push" | "encrypt" = "idle";
-	private running = false;
+	/**
+	 * Everything that reads and writes the vault and the index takes turns: a pass,
+	 * encryption, a restore, a conflict decision. A restore or a decision taken while
+	 * a pass ran used to interleave with it, each saving the index over the other.
+	 * Counts the holder and everyone waiting, so a pass is never started in the gap
+	 * between one holder and the next.
+	 */
+	private claims = 0;
+	private tail: Promise<void> = Promise.resolve();
 	private queued = false;
 	/** Whether this engine has looked for changes made while nobody was watching. */
 	private scanned = false;
@@ -198,7 +206,22 @@ export class SyncEngine {
 	}
 
 	get busy(): boolean {
-		return this.running;
+		return this.claims > 0;
+	}
+
+	/** Run fn once everything before it has finished. Claimed synchronously, on the call. */
+	private async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+		this.claims++;
+		const before = this.tail;
+		let release!: () => void;
+		this.tail = new Promise<void>((r) => (release = r));
+		try {
+			await before;
+			return await fn();
+		} finally {
+			this.claims--;
+			release();
+		}
 	}
 
 	/** True while the plugin itself is writing this path. */
@@ -330,13 +353,17 @@ export class SyncEngine {
 	 * conflicts that a pull would have avoided.
 	 */
 	async sync(manual = false): Promise<SyncReport> {
-		if (this.running) {
-			// A pass is already in flight. Remember that something changed while it ran
-			// and let the caller schedule another one rather than interleaving two.
+		if (this.busy) {
+			// A pass, or something else that writes, is already in flight. Remember that
+			// something changed while it ran and let the caller schedule another one
+			// rather than interleaving two.
 			this.queued = true;
 			return emptyReport();
 		}
-		this.running = true;
+		return this.exclusive(() => this.runPass(manual));
+	}
+
+	private async runPass(manual: boolean): Promise<SyncReport> {
 		const report = emptyReport();
 		try {
 			await this.pruneConflicts();
@@ -374,7 +401,6 @@ export class SyncEngine {
 		} finally {
 			this.phase = "idle";
 			this.passCipher = null;
-			this.running = false;
 			await this.deps.index.save();
 		}
 		return report;
@@ -400,8 +426,13 @@ export class SyncEngine {
 	 * skipped parts cost a hash each.
 	 */
 	async encryptInPlace(args: EncryptInPlaceArgs): Promise<EncryptReport> {
-		if (this.running) throw new Error("a sync is running; try again in a moment");
-		this.running = true;
+		// Refused rather than queued: the guard of a running pass can be what started
+		// this, and waiting on that pass from inside it would never end.
+		if (this.busy) throw new Error("a sync is running; try again in a moment");
+		return this.exclusive(() => this.encryptHeld(args));
+	}
+
+	private async encryptHeld(args: EncryptInPlaceArgs): Promise<EncryptReport> {
 		this.phase = "encrypt";
 		const adapter = this.deps.app.vault.adapter;
 		const out: EncryptReport = { pulled: 0, uploaded: 0, kept: 0, erased: 0, purgedBytes: 0 };
@@ -542,7 +573,6 @@ export class SyncEngine {
 		} finally {
 			this.phase = "idle";
 			this.passCipher = null;
-			this.running = false;
 			await this.deps.index.save();
 		}
 	}
@@ -1437,8 +1467,15 @@ export class SyncEngine {
 	 * The content is fetched from the last revision that had any, written to the
 	 * vault, and sent up as a new revision on top of the tombstone. Other devices
 	 * then see an ordinary edit, which is exactly what this is.
+	 *
+	 * Waits for a running pass rather than failing: somebody pressed a button and
+	 * expects it done. Everything is read after the wait, not before.
 	 */
 	async restore(path: string, tombstoneRev: number, contentRev: number): Promise<void> {
+		return this.exclusive(() => this.restoreHeld(path, tombstoneRev, contentRev));
+	}
+
+	private async restoreHeld(path: string, tombstoneRev: number, contentRev: number): Promise<void> {
 		const client = this.deps.client();
 		if (!client) throw new Error("not configured");
 		const barrier = await this.deps.guard(true);
@@ -1462,8 +1499,14 @@ export class SyncEngine {
 	 * "mine" sends this device's version up as a new revision. "server" simply drops
 	 * the copy. "merged" writes the three-way merge with its markers into the note so
 	 * the two texts can be reconciled by hand in one place.
+	 *
+	 * Waits for a running pass, like restore.
 	 */
 	async resolveConflict(path: string, choice: "mine" | "server" | "merged"): Promise<void> {
+		return this.exclusive(() => this.resolveHeld(path, choice));
+	}
+
+	private async resolveHeld(path: string, choice: "mine" | "server" | "merged"): Promise<void> {
 		const client = this.deps.client();
 		const pending = this.deps.index.conflicts.find((c) => c.path === path);
 		if (!client || !pending) return;

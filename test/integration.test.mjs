@@ -1703,3 +1703,113 @@ test("a pass that unlocks during its own guard still translates every name", asy
 	const names = Object.keys(await b.vault.snapshot()).filter((p) => !p.startsWith(".index"));
 	assert.deepEqual(names, ["notes/plan.md"], `ciphertext names leaked into the vault: ${names}`);
 });
+
+/**
+ * A device whose next pass stops inside its first request to the change log until
+ * released. Everything else goes through untouched.
+ */
+async function deviceWithHeldPass(server, name, token) {
+	let hold = null;
+	let entered = () => {};
+	const device = await makeDevice(server, name, token, {
+		wrapClient: (c) =>
+			Object.assign(Object.create(c), {
+				async changes(...args) {
+					const h = hold;
+					if (h) {
+						hold = null;
+						entered();
+						await h;
+					}
+					return c.changes(...args);
+				},
+			}),
+	});
+	return Object.assign(device, {
+		/** Start a pass and resolve once it is parked inside its pull. */
+		async startHeldPass() {
+			let release;
+			hold = new Promise((r) => (release = r));
+			const inPull = new Promise((r) => (entered = r));
+			const pass = device.sync();
+			await inPull;
+			return { pass, release };
+		},
+	});
+}
+
+test("restoring a file waits for a running pass instead of interleaving with it", async (t) => {
+	const server = await startServer();
+	const a = await makeDevice(server, "mac", server.tokens.a);
+	const b = await deviceWithHeldPass(server, "iphone", server.tokens.b);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	await a.edit("gone.md", "bring me back\n");
+	await a.sync();
+	await b.sync();
+	await a.delete("gone.md");
+	await a.sync();
+	await b.sync();
+	const entry = (await b.engine.deletedFiles()).find((f) => f.path === "gone.md");
+	assert.ok(entry);
+
+	const { pass, release } = await b.startHeldPass();
+	let restored = false;
+	const restoring = b.engine.restore(entry.path, entry.rev, entry.content_rev).then(() => {
+		restored = true;
+	});
+	await new Promise((r) => setTimeout(r, 200));
+	assert.equal(restored, false, "the restore must wait for the pass");
+	assert.equal(await b.vault.exists("gone.md"), false, "nothing is written while the pass runs");
+
+	release();
+	await pass;
+	await restoring;
+	assert.equal(await b.vault.read("gone.md"), "bring me back\n");
+	await a.sync();
+	assert.equal(await a.vault.read("gone.md"), "bring me back\n");
+});
+
+test("resolving a conflict waits for a running pass instead of interleaving with it", async (t) => {
+	const server = await startServer();
+	const a = await makeDevice(server, "mac", server.tokens.a);
+	const b = await deviceWithHeldPass(server, "iphone", server.tokens.b);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	await a.edit("note.md", "shared\n");
+	await a.sync();
+	await b.sync();
+	await a.edit("note.md", "from the mac\n");
+	await b.edit("note.md", "from the phone\n");
+	await a.sync();
+	await b.sync();
+	const copy = b.index.conflicts[0]?.copy;
+	assert.ok(copy, "a conflict to resolve");
+
+	const { pass, release } = await b.startHeldPass();
+	let resolved = false;
+	const resolving = b.engine.resolveConflict("note.md", "mine").then(() => {
+		resolved = true;
+	});
+	await new Promise((r) => setTimeout(r, 200));
+	assert.equal(resolved, false, "the decision must wait for the pass");
+	assert.equal(b.index.conflicts.length, 1, "the conflict is still pending while the pass runs");
+	assert.equal(await b.vault.read("note.md"), "from the mac\n");
+
+	release();
+	await pass;
+	await resolving;
+	assert.equal(b.index.conflicts.length, 0);
+	assert.equal(await b.vault.read("note.md"), "from the phone\n");
+	assert.equal(await b.vault.exists(copy), false);
+	await a.sync();
+	assert.equal(await a.vault.read("note.md"), "from the phone\n");
+});
