@@ -402,9 +402,6 @@ export default class LockstepPlugin extends Plugin {
 	 * The key parameters live on the server, so the first device to enable encryption
 	 * writes them and every other device reads them and checks the passphrase against
 	 * them. That is what makes a second device able to join knowing only the words.
-	 */
-	/**
-	 * Bring encryption into the state the settings ask for.
 	 *
 	 * Several things call this: loading, leaving the passphrase field, pressing the
 	 * button, and every pass that finds the vault locked. On a phone the button press
@@ -579,8 +576,12 @@ export default class LockstepPlugin extends Plugin {
 
 	/** Apply a decision about a conflict and refresh what the status bar shows. */
 	async resolveConflict(path: string, choice: "mine" | "server" | "merged"): Promise<void> {
-		await this.engine.resolveConflict(path, choice);
-		this.setStatus(this.lastStatus);
+		try {
+			await this.engine.resolveConflict(path, choice);
+			this.setStatus(this.lastStatus);
+		} finally {
+			this.syncIfAsked();
+		}
 	}
 
 	/**
@@ -711,7 +712,11 @@ export default class LockstepPlugin extends Plugin {
 			this.app,
 			() => this.engine.deletedFiles(),
 			async (file) => {
-				await this.engine.restore(file.path, file.rev, file.content_rev);
+				try {
+					await this.engine.restore(file.path, file.rev, file.content_rev);
+				} finally {
+					this.syncIfAsked();
+				}
 			},
 		).open();
 	}
@@ -828,6 +833,17 @@ export default class LockstepPlugin extends Plugin {
 		this.scheduleSync();
 	}
 
+	/**
+	 * Schedule the pass somebody asked for while the engine was busy. Called after
+	 * everything here that holds the engine, since a request can arrive during any
+	 * of them. The pass is an ordinary one even when the request was "Sync now": a
+	 * press made before the pass that found held-back deletions had said so must not
+	 * count as the answer to that warning.
+	 */
+	private syncIfAsked(): void {
+		if (this.engine.takeQueued() && !this.unloaded) this.scheduleSync();
+	}
+
 	private scheduleSync(): void {
 		if (this.debounce) window.clearTimeout(this.debounce);
 		this.debounce = window.setTimeout(() => void this.syncNow(true), DEBOUNCE_MS);
@@ -856,7 +872,13 @@ export default class LockstepPlugin extends Plugin {
 	async syncNow(quiet = false): Promise<void> {
 		if (!this.client(!quiet)) return;
 		if (this.blocked(quiet)) return;
-		if (this.engine.busy) return;
+		if (this.engine.busy) {
+			// Something that writes is running. The engine remembers the request and the
+			// holder schedules a pass when it is done; dropping it lost a "Sync now".
+			void this.engine.sync(!quiet);
+			if (!quiet) new Notice(t("notice.syncQueued"));
+			return;
+		}
 		const started = Date.now();
 		this.setStatus(t("status.syncing"));
 		if (!quiet) new Notice(t("notice.syncing"));
@@ -868,12 +890,12 @@ export default class LockstepPlugin extends Plugin {
 				this.lastSummary = t(this.cipher.enabled ? "progress.doneEncrypted" : "progress.done");
 				for (const el of this.progressTargets) el.setText(this.lastSummary);
 			}
-			if (this.engine.takeQueued()) this.scheduleSync();
 		} catch (e) {
 			this.reportError(t("error.sync"), e);
 		} finally {
 			this.endProgress(this.lastSummary);
 			await this.flushJournal();
+			this.syncIfAsked();
 		}
 	}
 
@@ -943,6 +965,7 @@ export default class LockstepPlugin extends Plugin {
 		} finally {
 			this.endProgress(this.lastSummary);
 			await this.flushJournal();
+			this.syncIfAsked();
 		}
 	}
 
@@ -1131,6 +1154,7 @@ export default class LockstepPlugin extends Plugin {
 		} finally {
 			this.endProgress(null);
 			await this.flushJournal();
+			this.syncIfAsked();
 		}
 	}
 

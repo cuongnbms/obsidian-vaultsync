@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { DataAdapter } from "obsidian";
+import type { ChangeEntry } from "./api";
 
 /**
  * The local index: which revision the client based each path on.
@@ -68,7 +69,7 @@ export interface PendingConflict {
  */
 export interface DeferredChange {
 	path: string;
-	entry: Record<string, unknown>;
+	entry: ChangeEntry;
 	seq: number;
 	attempts: number;
 	/** Unix ms before which it is not worth trying again. */
@@ -118,8 +119,10 @@ const EMPTY: IndexFile = {
 
 export class LocalIndex {
 	private data: IndexFile = { ...EMPTY, files: {}, renames: [], conflicts: [] };
+	/** The write in progress. */
 	private saving: Promise<void> | null = null;
-	private pending = false;
+	/** The write queued behind it, shared by everyone who asked while it ran. */
+	private next: Promise<void> | null = null;
 
 	constructor(
 		private adapter: DataAdapter,
@@ -261,25 +264,36 @@ export class LocalIndex {
 	}
 
 	/**
-	 * Checkpoint. Called after EVERY file rather than at the end of a batch: the
-	 * app is killed at arbitrary moments on mobile, and an unwritten index means
-	 * the next run treats already-downloaded files as missing.
+	 * Checkpoint. The engine calls it every couple of seconds during a pass and at
+	 * its end, rather than once at the end of a batch: the app is killed at
+	 * arbitrary moments on mobile, and an unwritten index means the next run treats
+	 * already-downloaded files as missing.
+	 *
+	 * The promise resolves once a write that started after this call has finished,
+	 * so whatever the caller changed before calling is on disk, and it rejects when
+	 * that write fails. Callers who ask while a write runs share the next one.
 	 *
 	 * The previous copy is kept alongside, so a torn write cannot blank the index.
 	 */
-	async save(): Promise<void> {
-		if (this.saving) {
-			this.pending = true;
-			return this.saving;
-		}
-		this.saving = this.writeNow().finally(() => {
-			this.saving = null;
-			if (this.pending) {
-				this.pending = false;
-				void this.save();
-			}
+	save(): Promise<void> {
+		if (this.next) return this.next;
+		if (!this.saving) return this.start();
+		// The running write may have serialised the index before this caller's changes.
+		this.next = this.saving
+			.catch(() => undefined)
+			.then(() => {
+				this.next = null;
+				return this.start();
+			});
+		return this.next;
+	}
+
+	private start(): Promise<void> {
+		const write: Promise<void> = this.writeNow().finally(() => {
+			if (this.saving === write) this.saving = null;
 		});
-		return this.saving;
+		this.saving = write;
+		return write;
 	}
 
 	private async writeNow(): Promise<void> {
