@@ -10,7 +10,7 @@ import { VaultCipher, WrongPassphrase, plaintext, type Cipher, type PathCipher, 
 import { t } from "./i18n";
 import { LocalIndex } from "./index-store";
 import { defaultDeviceName, toNFC } from "./paths";
-import { SyncEngine, listPaths, type SyncReport } from "./sync-engine";
+import { SyncEngine, listPaths, mayPassWithoutKeyAnswer, type SyncReport } from "./sync-engine";
 import { DEFAULT_SETTINGS, SyncSettingsTab, type SyncSettings, defaultExcludes } from "./settings";
 
 /** How long to wait after the last edit before syncing. Obsidian fires on every keystroke. */
@@ -53,6 +53,8 @@ export default class LockstepPlugin extends Plugin {
 	private vaultHasKey: boolean | null = null;
 	/** Whether the vault stores files under sealed names, as its key record says. */
 	private vaultHidesNames: boolean | null = null;
+	/** The server and token the two answers above came from. */
+	private binding = "";
 	/** The migration marker last seen on the key record, while one is running. */
 	private migration: Migration | null = null;
 	/** In flight, so two callers do not both do it and both report it. */
@@ -116,6 +118,7 @@ export default class LockstepPlugin extends Plugin {
 
 	override async onload(): Promise<void> {
 		await this.loadSettings();
+		this.binding = this.bindingOf(this.settings);
 
 		const dir = normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`);
 		this.index = new LocalIndex(this.app.vault.adapter, dir);
@@ -257,8 +260,21 @@ export default class LockstepPlugin extends Plugin {
 	}
 
 	async saveSettings(): Promise<void> {
+		// Another server, or another vault on it: what the old one said about its key
+		// says nothing about this one. A stale "no key" would let the guard wave a
+		// pass through on the first hiccup.
+		const binding = this.bindingOf(this.settings);
+		if (binding !== this.binding) {
+			this.binding = binding;
+			this.vaultHasKey = null;
+			this.vaultHidesNames = null;
+		}
 		await this.saveData(this.settings);
 		this.engine?.updateSettings(this.settings);
+	}
+
+	private bindingOf(settings: SyncSettings): string {
+		return `${settings.serverUrl}\n${settings.token}`;
 	}
 
 	statusLine(): string {
@@ -956,8 +972,14 @@ export default class LockstepPlugin extends Plugin {
 						merged: report.merged,
 						conflicts: report.conflicts,
 					});
-		this.setStatus(line);
-		if (!quiet || report.conflicts > 0) new Notice(t("notice.syncDone", { summary: line }));
+		// A pass the barrier stopped did nothing, and "up to date" would say otherwise.
+		const barrier = this.cipherStatus !== "" && report.errors.includes(this.cipherStatus);
+		this.setStatus(barrier ? this.cipherStatus : line);
+		if (barrier) {
+			if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
+		} else if (!quiet || report.conflicts > 0) {
+			new Notice(t("notice.syncDone", { summary: line }));
+		}
 		// The barrier is a state, already on the status bar and already announced
 		// once. Reported as a sync error too, it doubled every notice around it.
 		const errors = report.errors.filter((e) => e !== this.cipherStatus);
@@ -1007,6 +1029,8 @@ export default class LockstepPlugin extends Plugin {
 			this.vaultHasKey = key !== null;
 			if (key) this.vaultHidesNames = key.paths === "encrypted";
 			if (!key) {
+				// Answered at last, so the wait the status bar described is over.
+				if (this.cipherStatus === t("status.keyUnknown")) this.cipherStatus = t("encryption.off");
 				// No key and no passphrase. Before the very first upload of an existing
 				// vault into an empty server, that combination must not start on its
 				// own: whatever goes up now goes up readable, permanently, and the
@@ -1030,7 +1054,14 @@ export default class LockstepPlugin extends Plugin {
 				return "";
 			}
 		} catch {
-			return ""; // cannot tell, and refusing on a network hiccup helps nobody
+			// Cannot tell. Already told "no key" this session, this is a hiccup and
+			// refusing would help nobody. Never told, the vault may hide its names, and
+			// a plaintext pass would publish readable ones (see mayPassWithoutKeyAnswer).
+			// Said on the status bar only: offline, every pass lands here.
+			if (mayPassWithoutKeyAnswer(this.vaultHasKey)) return "";
+			this.cipherStatus = t("status.keyUnknown");
+			this.setStatus(this.cipherStatus);
+			return this.cipherStatus;
 		}
 		// The vault has a key and this device has none.
 		this.locked = true;

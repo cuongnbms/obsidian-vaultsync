@@ -145,6 +145,20 @@ export class ExcludedOnServer extends Error {
 	}
 }
 
+/**
+ * Whether a device with no passphrase may sync when the server could not be asked
+ * whether the vault has a key.
+ *
+ * Only once the server has said "no key" this session: refusing then would stop
+ * syncing on every network hiccup. Never answered, the vault may hide its names,
+ * and a plaintext pass writes the ciphertext names to disk as files and sends new
+ * notes up under readable names, which the server takes and no device with the key
+ * ever sees.
+ */
+export function mayPassWithoutKeyAnswer(vaultHasKey: boolean | null): boolean {
+	return vaultHasKey === false;
+}
+
 /** The first few paths and how many more, for a message that has to stay readable. */
 export function listPaths(paths: string[], shown = 5): string {
 	const head = paths.slice(0, shown).join(", ");
