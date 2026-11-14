@@ -54,6 +54,19 @@ function emptyReport(): SyncReport {
 	};
 }
 
+/** What "Download everything" did. */
+export interface PullAllReport {
+	downloaded: number;
+	/** Files that differed, taken from the server with the local version kept aside. */
+	kept: number;
+	skipped: number;
+	/** Deletions left for the next sync, which applies them only to untouched files. */
+	left: number;
+	errors: string[];
+	/** Why nothing was done at all, when something stopped it. */
+	barrier?: string;
+}
+
 /** What encryptInPlace needs beyond the engine's own dependencies. */
 export interface EncryptInPlaceArgs {
 	/** Talks to the server by the names it holds now: the readable ones. */
@@ -132,6 +145,20 @@ export class ExcludedOnServer extends Error {
 	}
 }
 
+/**
+ * Whether a device with no passphrase may sync when the server could not be asked
+ * whether the vault has a key.
+ *
+ * Only once the server has said "no key" this session: refusing then would stop
+ * syncing on every network hiccup. Never answered, the vault may hide its names,
+ * and a plaintext pass writes the ciphertext names to disk as files and sends new
+ * notes up under readable names, which the server takes and no device with the key
+ * ever sees.
+ */
+export function mayPassWithoutKeyAnswer(vaultHasKey: boolean | null): boolean {
+	return vaultHasKey === false;
+}
+
 /** The first few paths and how many more, for a message that has to stay readable. */
 export function listPaths(paths: string[], shown = 5): string {
 	const head = paths.slice(0, shown).join(", ");
@@ -149,7 +176,15 @@ export class SyncEngine {
 	private passCipher: Cipher | null = null;
 	/** Which half of a pass is running, for progress wording. */
 	phase: "idle" | "pull" | "push" | "encrypt" = "idle";
-	private running = false;
+	/**
+	 * Everything that reads and writes the vault and the index takes turns: a pass,
+	 * encryption, a restore, a conflict decision. A restore or a decision taken while
+	 * a pass ran used to interleave with it, each saving the index over the other.
+	 * Counts the holder and everyone waiting, so a pass is never started in the gap
+	 * between one holder and the next.
+	 */
+	private claims = 0;
+	private tail: Promise<void> = Promise.resolve();
 	private queued = false;
 	/** Whether this engine has looked for changes made while nobody was watching. */
 	private scanned = false;
@@ -198,12 +233,58 @@ export class SyncEngine {
 	}
 
 	get busy(): boolean {
-		return this.running;
+		return this.claims > 0;
+	}
+
+	/** Run fn once everything before it has finished. Claimed synchronously, on the call. */
+	private async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+		this.claims++;
+		const before = this.tail;
+		let release!: () => void;
+		this.tail = new Promise<void>((r) => (release = r));
+		try {
+			await before;
+			return await fn();
+		} finally {
+			this.claims--;
+			release();
+		}
 	}
 
 	/** True while the plugin itself is writing this path. */
 	isSuppressed(path: string): boolean {
 		return this.suppressed.has(path);
+	}
+
+	/**
+	 * True for a file the plugin wrote for the person and keeps off the server, a
+	 * conflict copy or a backup, that nothing has sent yet. Neither the watcher nor
+	 * the pass may take it up. One an older version already uploaded is tracked and
+	 * syncs as any other file, so that its removal still reaches the server.
+	 */
+	isLocalOnly(path: string): boolean {
+		return !this.deps.index.get(path) && this.deps.index.localOnly.includes(path);
+	}
+
+	/** Write a file for the person, alongside the one the sync owns, and keep it here. */
+	private async writeLocalOnly(path: string, data: ArrayBuffer): Promise<void> {
+		await this.write(path, data);
+		this.deps.index.remove(path);
+		this.deps.index.keepLocal(path);
+	}
+
+	/**
+	 * Remove a copy the person no longer needs. If an older version uploaded it, the
+	 * removal goes to the server too: only the watcher would have said so, and it
+	 * may not be listening.
+	 */
+	private async removeCopy(path: string): Promise<void> {
+		const adapter = this.deps.app.vault.adapter;
+		if (await adapter.exists(path)) await adapter.remove(path);
+		this.deps.index.forgetLocal(path);
+		const known = this.deps.index.get(path);
+		if (known && known.base_rev > 0) this.deps.index.set(path, { ...known, dirty: true });
+		else this.deps.index.remove(path);
 	}
 
 	private async write(path: string, data: ArrayBuffer): Promise<void> {
@@ -330,13 +411,17 @@ export class SyncEngine {
 	 * conflicts that a pull would have avoided.
 	 */
 	async sync(manual = false): Promise<SyncReport> {
-		if (this.running) {
-			// A pass is already in flight. Remember that something changed while it ran
-			// and let the caller schedule another one rather than interleaving two.
+		if (this.busy) {
+			// A pass, or something else that writes, is already in flight. Remember that
+			// something changed while it ran and let the caller schedule another one
+			// rather than interleaving two.
 			this.queued = true;
 			return emptyReport();
 		}
-		this.running = true;
+		return this.exclusive(() => this.runPass(manual));
+	}
+
+	private async runPass(manual: boolean): Promise<SyncReport> {
 		const report = emptyReport();
 		try {
 			await this.pruneConflicts();
@@ -374,7 +459,6 @@ export class SyncEngine {
 		} finally {
 			this.phase = "idle";
 			this.passCipher = null;
-			this.running = false;
 			await this.deps.index.save();
 		}
 		return report;
@@ -400,8 +484,13 @@ export class SyncEngine {
 	 * skipped parts cost a hash each.
 	 */
 	async encryptInPlace(args: EncryptInPlaceArgs): Promise<EncryptReport> {
-		if (this.running) throw new Error("a sync is running; try again in a moment");
-		this.running = true;
+		// Refused rather than queued: the guard of a running pass can be what started
+		// this, and waiting on that pass from inside it would never end.
+		if (this.busy) throw new Error("a sync is running; try again in a moment");
+		return this.exclusive(() => this.encryptHeld(args));
+	}
+
+	private async encryptHeld(args: EncryptInPlaceArgs): Promise<EncryptReport> {
 		this.phase = "encrypt";
 		const adapter = this.deps.app.vault.adapter;
 		const out: EncryptReport = { pulled: 0, uploaded: 0, kept: 0, erased: 0, purgedBytes: 0 };
@@ -460,7 +549,7 @@ export class SyncEngine {
 			this.passCipher = args.cipher;
 			const onDisk = new Set<string>();
 			for (const path of [...this.deps.listLocalFiles(), ...this.deps.index.paths()]) {
-				if (this.isExcluded(path) || this.deps.index.get(path)?.folder) continue;
+				if (this.isExcluded(path) || this.deps.index.get(path)?.folder || this.isLocalOnly(path)) continue;
 				if (await adapter.exists(path)) onDisk.add(path);
 			}
 			const queue = [...onDisk].sort((a, b) => weight(a) - weight(b) || a.localeCompare(b));
@@ -542,7 +631,6 @@ export class SyncEngine {
 		} finally {
 			this.phase = "idle";
 			this.passCipher = null;
-			this.running = false;
 			await this.deps.index.save();
 		}
 	}
@@ -563,6 +651,11 @@ export class SyncEngine {
 			changed = true;
 			this.deps.log(`forgot a conflict whose copy was deleted: ${conflict.path}`);
 		}
+		for (const path of this.deps.index.localOnly) {
+			if (await adapter.exists(path)) continue;
+			this.deps.index.forgetLocal(path);
+			changed = true;
+		}
 		if (changed) await this.deps.index.save();
 		return changed;
 	}
@@ -572,6 +665,158 @@ export class SyncEngine {
 		const q = this.queued;
 		this.queued = false;
 		return q;
+	}
+
+	// --- download everything ----------------------------------------------------
+
+	/**
+	 * Take the whole vault from the server without sending anything back.
+	 *
+	 * What you run on a new device. It never deletes a local file: anything that
+	 * differs from the server is kept aside first, on this device only. A deletion
+	 * the server has and this device has not applied yet is left for the next sync,
+	 * which applies it to an untouched file and lets an edited one win, as always.
+	 * Dropping it here instead left the file behind unknown to the index, and the
+	 * next pass uploaded it over the deletion.
+	 *
+	 * Waits for a running pass, and answers to the same barrier.
+	 */
+	async pullAll(): Promise<PullAllReport> {
+		return this.exclusive(() => this.pullAllHeld());
+	}
+
+	private async pullAllHeld(): Promise<PullAllReport> {
+		const out: PullAllReport = { downloaded: 0, kept: 0, skipped: 0, left: 0, errors: [] };
+		try {
+			await this.pruneConflicts();
+			const barrier = await this.deps.guard(true);
+			if (barrier) {
+				out.barrier = barrier;
+				return out;
+			}
+			// After the guard, for the reason given in runPass.
+			const client = this.deps.client();
+			if (!client) return out;
+			await this.resetCursorIfCipherChanged();
+			this.passCipher = this.deps.cipher();
+			this.phase = "pull";
+			// Deletions up to here were already offered to a pass and decided there.
+			const seen = this.deps.index.lastSeq;
+			const failures = emptyReport();
+			let lastCheckpoint = Date.now();
+			let since = 0;
+			for (;;) {
+				const page = await client.changes(since, 200);
+				for (const entry of page.entries) {
+					if (this.deps.stopped()) return out;
+					const path = toNFC(entry.path);
+					if (this.isExcluded(path) || this.deps.index.renames.some((r) => r.from === path)) {
+						out.skipped++;
+						continue;
+					}
+					try {
+						out[await this.takeOneWay(client, entry, path, entry.seq > seen)]++;
+					} catch (e) {
+						// Tried again ahead of the next pass, exactly as a pull would.
+						this.defer(path, entry, e, failures);
+					}
+					this.deps.onProgress?.(out.downloaded + out.kept, 0, path);
+					if (Date.now() - lastCheckpoint > 2000) {
+						lastCheckpoint = Date.now();
+						await this.deps.index.save();
+					}
+				}
+				since = page.next_seq;
+				if (!page.has_more) break;
+			}
+			// Everything up to here was taken in, kept aside, or parked for the next
+			// pass. A run cut short leaves the cursor where it was.
+			this.deps.index.setLastSeq(since);
+			out.errors = failures.errors;
+			return out;
+		} finally {
+			this.phase = "idle";
+			this.passCipher = null;
+			await this.deps.index.save();
+		}
+	}
+
+	private async takeOneWay(
+		client: SyncClient,
+		entry: ChangeEntry,
+		path: string,
+		unseen: boolean,
+	): Promise<"downloaded" | "kept" | "skipped" | "left"> {
+		const adapter = this.deps.app.vault.adapter;
+		if (entry.folder) {
+			if (!(await adapter.exists(path))) await adapter.mkdir(path);
+			this.deps.index.set(path, {
+				base_rev: entry.rev,
+				base_hash: "",
+				local_hash: "",
+				mtime: entry.mtime,
+				folder: true,
+			});
+			return "downloaded";
+		}
+		if (entry.deleted) {
+			if (!(await adapter.exists(path))) {
+				this.deps.index.remove(path);
+				return "skipped";
+			}
+			if (!unseen) return "skipped";
+			// The next pass's pull starts with these, under the ordinary rule.
+			this.deps.index.defer({
+				path,
+				entry: entry as unknown as Record<string, unknown>,
+				seq: entry.seq,
+				attempts: 0,
+				next_try: 0,
+				error: "deletion left for the next sync by Download everything",
+			});
+			this.trace(`download everything left the deletion of ${path} for the next sync`);
+			return "left";
+		}
+		if (!(await adapter.exists(path))) {
+			await this.download(client, entry, path);
+			return "downloaded";
+		}
+		const local = await adapter.readBinary(path);
+		const localHash = await sha256(local);
+		if (await this.matchesRemote(local, entry.hash)) {
+			this.deps.index.set(path, {
+				base_rev: entry.rev,
+				base_hash: entry.hash ?? "",
+				plain_hash: localHash,
+				local_hash: localHash,
+				mtime: entry.mtime,
+			});
+			return "skipped";
+		}
+		// Unchanged since this device last had it from the server: nothing of its
+		// own to keep.
+		if (this.deps.index.get(path)?.plain_hash === localHash) {
+			await this.download(client, entry, path);
+			return "downloaded";
+		}
+		const backup = await this.freeName(conflictName(path, this.deviceName(), new Date()));
+		await this.writeLocalOnly(backup, local);
+		await this.download(client, entry, path);
+		this.trace(`download everything kept ${path} aside as ${backup}`);
+		return "kept";
+	}
+
+	/** name, or name with a number added, whichever is not on disk yet. */
+	private async freeName(name: string): Promise<string> {
+		const adapter = this.deps.app.vault.adapter;
+		if (!(await adapter.exists(name))) return name;
+		const dot = name.lastIndexOf(".");
+		const slash = name.lastIndexOf("/");
+		const [stem, ext] = dot > slash ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+		for (let n = 2; ; n++) {
+			const candidate = `${stem} ${n}${ext}`;
+			if (!(await adapter.exists(candidate))) return candidate;
+		}
 	}
 
 	// --- pull -----------------------------------------------------------------
@@ -1011,7 +1256,7 @@ export class SyncEngine {
 		let adopted = 0;
 		for (const path of this.deps.listLocalFiles()) {
 			const normal = toNFC(path);
-			if (this.isExcluded(normal) || this.deps.index.get(normal)) continue;
+			if (this.isExcluded(normal) || this.deps.index.get(normal) || this.isLocalOnly(normal)) continue;
 			this.deps.index.set(normal, {
 				base_rev: 0,
 				base_hash: "",
@@ -1398,8 +1643,13 @@ export class SyncEngine {
 		mergeable = false,
 		serverDevice = "",
 	): Promise<void> {
-		const copy = conflictName(path, this.deviceName(), new Date());
-		await this.write(copy, localData);
+		// The name only goes down to the minute, and a copy kept on this device alone
+		// that the next one lands on is gone for good.
+		const copy = await this.freeName(conflictName(path, this.deviceName(), new Date()));
+		// The copy exists for the person, not for the sync, and uploading it would
+		// spread one device's confusion to every other, none of which holds the
+		// conflict it belongs to.
+		await this.writeLocalOnly(copy, localData);
 		await this.write(path, server.data);
 		this.deps.index.set(path, {
 			base_rev: server.rev,
@@ -1408,9 +1658,6 @@ export class SyncEngine {
 			local_hash: server.plainHash ?? "",
 			mtime: Date.now(),
 		});
-		// The copy is deliberately not tracked. It exists for the person, not for the
-		// sync, and uploading it would spread one device's confusion to every other.
-		this.deps.index.remove(copy);
 		this.deps.index.addConflict({
 			path,
 			copy,
@@ -1437,8 +1684,15 @@ export class SyncEngine {
 	 * The content is fetched from the last revision that had any, written to the
 	 * vault, and sent up as a new revision on top of the tombstone. Other devices
 	 * then see an ordinary edit, which is exactly what this is.
+	 *
+	 * Waits for a running pass rather than failing: somebody pressed a button and
+	 * expects it done. Everything is read after the wait, not before.
 	 */
 	async restore(path: string, tombstoneRev: number, contentRev: number): Promise<void> {
+		return this.exclusive(() => this.restoreHeld(path, tombstoneRev, contentRev));
+	}
+
+	private async restoreHeld(path: string, tombstoneRev: number, contentRev: number): Promise<void> {
 		const client = this.deps.client();
 		if (!client) throw new Error("not configured");
 		const barrier = await this.deps.guard(true);
@@ -1462,8 +1716,14 @@ export class SyncEngine {
 	 * "mine" sends this device's version up as a new revision. "server" simply drops
 	 * the copy. "merged" writes the three-way merge with its markers into the note so
 	 * the two texts can be reconciled by hand in one place.
+	 *
+	 * Waits for a running pass, like restore.
 	 */
 	async resolveConflict(path: string, choice: "mine" | "server" | "merged"): Promise<void> {
+		return this.exclusive(() => this.resolveHeld(path, choice));
+	}
+
+	private async resolveHeld(path: string, choice: "mine" | "server" | "merged"): Promise<void> {
 		const client = this.deps.client();
 		const pending = this.deps.index.conflicts.find((c) => c.path === path);
 		if (!client || !pending) return;
@@ -1473,7 +1733,7 @@ export class SyncEngine {
 		const adapter = this.deps.app.vault.adapter;
 
 		if (choice === "server") {
-			if (await adapter.exists(pending.copy)) await adapter.remove(pending.copy);
+			await this.removeCopy(pending.copy);
 			this.deps.index.clearConflict(path);
 			await this.deps.index.save();
 			return;
@@ -1511,7 +1771,7 @@ export class SyncEngine {
 		await this.write(path, data);
 		const entry = this.deps.index.get(path);
 		await this.send(client, path, entry?.base_rev ?? pending.server_rev, data, await sha256(data));
-		if (await adapter.exists(pending.copy)) await adapter.remove(pending.copy);
+		await this.removeCopy(pending.copy);
 		this.deps.index.clearConflict(path);
 		await this.deps.index.save();
 	}

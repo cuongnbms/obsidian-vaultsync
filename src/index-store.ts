@@ -99,6 +99,12 @@ interface IndexFile {
 	read_encrypted?: boolean;
 	/** Changes that failed to apply and are waiting for another try. */
 	deferred?: DeferredChange[];
+	/**
+	 * Files the plugin wrote for the person and keeps off the server: conflict copies
+	 * and the backups "Download everything" sets aside. Untracked on purpose, and
+	 * listed so that nothing later mistakes them for files nobody has sent yet.
+	 */
+	local_only?: string[];
 }
 
 const EMPTY: IndexFile = {
@@ -189,7 +195,10 @@ export class LocalIndex {
 
 	reset(): void {
 		const id = this.data.device_id;
-		this.data = { ...EMPTY, device_id: id, files: {}, renames: [], conflicts: [] };
+		// Files kept off the server stay off it: forgetting them would upload every
+		// conflict copy and backup on the next pass.
+		const localOnly = this.data.local_only;
+		this.data = { ...EMPTY, device_id: id, files: {}, renames: [], conflicts: [], local_only: localOnly };
 	}
 
 	get renames(): PendingRename[] {
@@ -222,6 +231,18 @@ export class LocalIndex {
 
 	undefer(path: string): void {
 		this.data.deferred = this.deferred.filter((d) => d.path !== path);
+	}
+
+	get localOnly(): string[] {
+		return this.data.local_only ?? [];
+	}
+
+	keepLocal(path: string): void {
+		if (!this.localOnly.includes(path)) this.data.local_only = [...this.localOnly, path];
+	}
+
+	forgetLocal(path: string): void {
+		this.data.local_only = this.localOnly.filter((p) => p !== path);
 	}
 
 	addConflict(conflict: PendingConflict): void {

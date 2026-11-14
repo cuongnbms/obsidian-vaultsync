@@ -24,6 +24,35 @@ Notes that differ in more than 2,000 lines are no longer merged line by line; bo
 versions are kept, as for any conflict that cannot be merged, and the same note now
 takes under 100 MB. Only the plugin changed.
 
+The copy a conflict keeps of this device's version was meant to stay on this
+device, but the next sync uploaded it, and it appeared on every other device, none
+of which could resolve it. Conflict copies now stay where they were made, as do the
+backups that Download everything keeps aside. A copy renamed by hand syncs under
+its new name. A copy an older version already uploaded is still removed from the
+server when its conflict is resolved. Two conflicts on the same note within one
+minute no longer write the second copy over the first.
+
+Download everything from the server bypassed the protections of a normal sync. It
+could run during a sync, fetched large files in one request rather than in slices
+that resume, kept a backup of files that were already identical, and uploaded its
+own backups on the next sync. A file deleted on the server but still on this device
+was uploaded again by the next sync, undoing the deletion everywhere. It now runs
+through the sync engine: it waits for a running sync, keeps aside only files that
+differ, keeps those backups on this device, and leaves a deletion to the next sync,
+which applies it to a file left untouched and keeps one that was edited. It still
+never deletes a local file.
+
+A device without a passphrase that could not ask the server whether the vault is
+encrypted synced anyway. Before the first answer since Obsidian started, the vault
+might hide its file names, and such a sync wrote encrypted names to disk as files
+and uploaded new notes under readable names, which devices with the key never saw.
+The device now waits for the answer, saying so on the status bar. Once the server
+has said the vault is not encrypted, a later network failure does not stop syncing.
+
+Restoring a deleted file or resolving a conflict while a sync ran interleaved with
+it, both writing the vault and the plugin's index. Both now wait for the sync to
+finish.
+
 ## 1.0.10
 
 A file created again at a path that had been deleted never reached the server, and

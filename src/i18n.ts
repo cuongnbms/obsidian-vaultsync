@@ -182,6 +182,8 @@ const en: Dict = {
 	"status.syncSummary":
 		"in {secs}s: {downloaded} down, {uploaded} up, {merged} merged, {conflicts} conflicts",
 	"status.upToDate": "up to date, seq {seq}",
+	"status.keyUnknown":
+		"waiting for the server to say whether this vault is encrypted; nothing syncs until it does",
 
 	"error.sync": "Sync",
 
@@ -205,9 +207,7 @@ const en: Dict = {
 	"status.pullSummary": "downloaded {downloaded}, skipped {skipped}, copies kept {kept} in {secs}s",
 
 	"error.pull": "Download",
-	"error.corruptDownload": "corrupt download of {path}: expected {want}, got {got}",
 
-	"conflict.label": "this device",
 };
 
 const ru: Dict = {
@@ -381,6 +381,8 @@ const ru: Dict = {
 	"status.syncSummary":
 		"за {secs}с: скачано {downloaded}, отправлено {uploaded}, слито {merged}, конфликтов {conflicts}",
 	"status.upToDate": "всё синхронно, seq {seq}",
+	"status.keyUnknown":
+		"жду ответа сервера, зашифровано ли хранилище; до тех пор ничего не синхронизируется",
 
 	"error.sync": "Синхронизация",
 
@@ -402,9 +404,7 @@ const ru: Dict = {
 	"status.pullSummary": "скачано {downloaded}, пропущено {skipped}, копий сохранено {kept} за {secs}с",
 
 	"error.pull": "Скачивание",
-	"error.corruptDownload": "битая загрузка {path}: ожидали {want}, получили {got}",
 
-	"conflict.label": "это устройство",
 };
 
 const locales: Record<string, Dict> = { ru };
