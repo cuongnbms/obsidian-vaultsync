@@ -150,3 +150,51 @@ test("markers never render as headings, rules or quotes on their own", () => {
 	}
 	assert.match(r.text, /^%% lockstep: local %%$/m);
 });
+
+// A note rewritten wholesale (line endings converted, a formatter run over it) has
+// an edit distance as large as the file. Myers' trace then grows as D * (n + m):
+// 10,000 lines took 3 GB and 13 s. Past a bound the merge is not attempted at all.
+const bigLines = Array.from({ length: 10000 }, (_, i) => `line ${i} of a fairly ordinary note`);
+const bigBase = bigLines.join("\n") + "\n";
+
+test("a note rewritten end to end is reported as not mergeable, and quickly", () => {
+	const mine = bigLines.join("\r\n") + "\r\n"; // every line now ends in \r
+	const theirs = bigBase.replace("line 5 of", "line FIVE of");
+	const started = Date.now();
+	const r = merge3(bigBase, mine, theirs);
+	assert.ok(Date.now() - started < 2000, `merge took ${Date.now() - started} ms`);
+	assert.equal(r.mergeable, false);
+	assert.equal(r.clean, false);
+});
+
+test("two notes created apart from nothing merge as one conflict, quickly", () => {
+	// An empty base: a first sync, a reset index, or a device joining encryption.
+	const mine = bigBase.replace("line 5 of", "line five of");
+	const theirs = bigBase.replace("line 7 of", "line seven of");
+	const started = Date.now();
+	const r = merge3("", mine, theirs, "phone", "server");
+	// Nothing can be common with an empty base, so there is nothing to search: a few
+	// milliseconds. Searching anyway took about a second and 860 MB.
+	assert.ok(Date.now() - started < 250, `merge took ${Date.now() - started} ms`);
+	assert.equal(r.mergeable, true, "a conflict this size can still be offered as a merge");
+	assert.equal(r.conflicts, 1);
+	assert.equal(r.text, `%% lockstep: phone %%\n${mine}%% lockstep: server %%\n${theirs}%% lockstep: end %%\n`);
+});
+
+test("a long note edited at its first, middle and last lines merges exactly", () => {
+	const at = (edits) => bigLines.map((l, i) => edits[i] ?? l).join("\n") + "\n";
+	const mine = at({ 0: "mine first", 5000: "mine middle" });
+	const theirs = at({ 9999: "theirs last", 4000: "theirs inserted\nline 4000 of a fairly ordinary note" });
+	const r = merge3(bigBase, mine, theirs);
+	assert.equal(r.clean, true);
+	assert.equal(r.mergeable, true);
+	assert.equal(
+		r.text,
+		at({
+			0: "mine first",
+			4000: "theirs inserted\nline 4000 of a fairly ordinary note",
+			5000: "mine middle",
+			9999: "theirs last",
+		}),
+	);
+});

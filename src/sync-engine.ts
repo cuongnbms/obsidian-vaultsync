@@ -1227,6 +1227,13 @@ export class SyncEngine {
 
 		const merged = merge3(baseText, localText, serverText, this.deviceName(), "server");
 
+		if (!merged.mergeable) {
+			// Too different to line up (a note rewritten end to end). Offering a merge
+			// would only put the two whole files one after the other.
+			await this.keepBothWithoutMerging(path, localData, server, report, baseRev, false, serverDevice);
+			return;
+		}
+
 		if (merged.clean) {
 			const data = encodeText(merged.text);
 			await this.write(path, data);
@@ -1362,9 +1369,10 @@ export class SyncEngine {
 					baseText = "";
 				}
 			}
-			data = encodeText(
-				merge3(baseText, mineText, serverText, pending.device, "server").text,
-			);
+			const merged = merge3(baseText, mineText, serverText, pending.device, "server");
+			// The note may have been rewritten since the conflict was recorded.
+			if (!merged.mergeable) throw new Error("this file cannot be merged line by line");
+			data = encodeText(merged.text);
 		}
 
 		await this.write(path, data);

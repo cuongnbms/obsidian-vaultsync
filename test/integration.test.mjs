@@ -319,6 +319,51 @@ test("a binary file changed on both sides keeps both and does not try to merge",
 	assert.equal(await b.vault.exists(pending.copy), true, "both versions stay on disk");
 });
 
+test("a note rewritten end to end on one side keeps both and does not offer a merge", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const lines = Array.from({ length: 3000 }, (_, i) => `line ${i}`);
+	await a.edit("long.md", lines.join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+
+	// Every line now differs from the base: too far apart to line up.
+	await a.edit("long.md", lines.join("\r\n") + "\r\n");
+	await b.edit("long.md", lines.map((l, i) => (i === 5 ? "line five" : l)).join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+
+	const pending = b.index.conflicts[0];
+	assert.ok(pending, "the two versions still have to be put to a person");
+	assert.equal(pending.mergeable, false, "a merge of the whole file is not offered");
+	assert.equal(await b.vault.read(pending.copy), lines.map((l, i) => (i === 5 ? "line five" : l)).join("\n") + "\n");
+	await assert.rejects(b.engine.resolveConflict("long.md", "merged"), /cannot be merged/);
+});
+
+test("a merge asked for after the note was rewritten end to end is refused", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const lines = Array.from({ length: 3000 }, (_, i) => `line ${i}`);
+	const withLine5 = (text) => lines.map((l, i) => (i === 5 ? text : l));
+	await a.edit("long.md", lines.join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+	await a.edit("long.md", withLine5("from the mac").join("\n") + "\n");
+	await b.edit("long.md", withLine5("from the phone").join("\n") + "\n");
+	await a.sync();
+	await b.sync();
+	assert.equal(b.index.conflicts[0]?.mergeable, true, "an ordinary conflict can be merged");
+
+	// Before choosing, somebody converts the note's line endings.
+	const rewritten = withLine5("from the mac").join("\r\n") + "\r\n";
+	await b.vault.write("long.md", rewritten);
+	await assert.rejects(b.engine.resolveConflict("long.md", "merged"), /cannot be merged/);
+	assert.equal(await b.vault.read("long.md"), rewritten, "the note is left as it was");
+	assert.equal(b.index.conflicts.length, 1, "and the question stays open");
+});
+
 test("choosing this device's version sends it to the other one", async (t) => {
 	const { a, b, cleanup } = await twoDevices();
 	t.after(cleanup);
