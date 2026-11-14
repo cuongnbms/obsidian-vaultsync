@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import { Notice, Plugin, TAbstractFile, TFile, normalizePath, Platform } from "obsidian";
-import { ApiError, SyncClient, type ChangeEntry, redeemJoin } from "./api";
+import { ApiError, SyncClient, redeemJoin } from "./api";
 import { ConflictModal } from "./conflict-modal";
 import { showConflictNotice } from "./conflict-notice";
 import { RestoreModal } from "./restore-modal";
@@ -9,7 +9,7 @@ import { AddDeviceModal } from "./onboarding";
 import { VaultCipher, WrongPassphrase, plaintext, type Cipher, type PathCipher, type Migration, type VaultKeyRecord } from "./crypto";
 import { t } from "./i18n";
 import { LocalIndex } from "./index-store";
-import { conflictName, defaultDeviceName, sha256, toNFC } from "./paths";
+import { defaultDeviceName, toNFC } from "./paths";
 import { SyncEngine, listPaths, type SyncReport } from "./sync-engine";
 import { DEFAULT_SETTINGS, SyncSettingsTab, type SyncSettings, defaultExcludes } from "./settings";
 
@@ -1064,121 +1064,39 @@ export default class LockstepPlugin extends Plugin {
 	 *
 	 * Kept as a separate operation from the sync: it is what you run on a new device,
 	 * and it never deletes a local file. Anything that differs is copied aside first.
+	 * The engine does the work; this is the reporting around it.
 	 */
 	async pullAll(): Promise<void> {
-		const client = this.client();
-		if (!client) return;
+		if (!this.client()) return;
 		if (this.blocked(false)) return;
-		let since = 0;
-		let downloaded = 0;
-		let kept = 0;
-		let skipped = 0;
 		const started = Date.now();
 		new Notice(t("notice.pullStarted"));
 		try {
-			for (;;) {
-				const page = await client.changes(since, 200);
-				for (const entry of page.entries) {
-					const path = toNFC(entry.path);
-					if (this.engine.isExcluded(path)) {
-						skipped++;
-						continue;
-					}
-					const result = await this.applyOneWay(client, entry, path);
-					if (result === "downloaded") downloaded++;
-					else if (result === "conflict-copy") {
-						downloaded++;
-						kept++;
-					} else skipped++;
-					this.index.setLastSeq(entry.seq);
-					await this.index.save();
-				}
-				since = page.next_seq;
-				this.index.setLastSeq(since);
-				if (!page.has_more) break;
+			const report = await this.engine.pullAll();
+			if (report.barrier) {
+				// Asked for by hand, so it is said even if a pass said it before.
+				this.setStatus(report.barrier);
+				new Notice(`Lockstep: ${report.barrier}`, 8000);
+				return;
 			}
-			await this.index.save();
 			const secs = ((Date.now() - started) / 1000).toFixed(1);
-			const line = t("status.pullSummary", { downloaded, skipped, kept, secs });
+			const line = t("status.pullSummary", {
+				downloaded: report.downloaded + report.kept,
+				skipped: report.skipped + report.left,
+				kept: report.kept,
+				secs,
+			});
 			this.setStatus(line);
 			new Notice(t("notice.pullDone", { summary: line }));
+			for (const err of report.errors.slice(0, 3)) {
+				new Notice(t("notice.error", { what: t("error.pull"), message: err }), 8000);
+			}
 		} catch (e) {
-			await this.index.save();
 			this.reportError(t("error.pull"), e);
+		} finally {
+			this.endProgress(null);
+			await this.flushJournal();
 		}
-	}
-
-	private async applyOneWay(
-		client: SyncClient,
-		entry: ChangeEntry,
-		path: string,
-	): Promise<"downloaded" | "conflict-copy" | "skipped"> {
-		const adapter = this.app.vault.adapter;
-
-		if (entry.folder) {
-			if (!(await adapter.exists(path))) await adapter.mkdir(path);
-			this.index.set(path, {
-				base_rev: entry.rev,
-				base_hash: "",
-				local_hash: "",
-				mtime: entry.mtime,
-				folder: true,
-			});
-			return "downloaded";
-		}
-		if (entry.deleted) {
-			// A one-way download must never be able to erase a vault.
-			this.index.remove(path);
-			return "skipped";
-		}
-
-		if (await adapter.exists(path)) {
-			const local = await adapter.readBinary(path);
-			const localHash = await sha256(local);
-			const known = this.index.get(path);
-			if (known?.plain_hash === localHash && known.base_hash === entry.hash) {
-				this.index.set(path, { ...known, base_rev: entry.rev, mtime: entry.mtime });
-				return "skipped";
-			}
-			const backup = conflictName(path, this.settings.deviceName || t("conflict.label"), new Date());
-			await adapter.writeBinary(backup, local);
-			await this.writeFromServer(client, entry, path);
-			return "conflict-copy";
-		}
-
-		await this.writeFromServer(client, entry, path);
-		return "downloaded";
-	}
-
-	private async writeFromServer(
-		client: SyncClient,
-		entry: ChangeEntry,
-		path: string,
-	): Promise<void> {
-		const { data, hash } = await client.getFile(path, entry.rev);
-		const actual = await sha256(data);
-		if (entry.hash && actual !== entry.hash) {
-			throw new Error(
-				t("error.corruptDownload", { path, want: entry.hash ?? "", got: actual }),
-			);
-		}
-		const plain = await this.cipher.decrypt(data);
-		const plainHash = await sha256(plain);
-		const slash = path.lastIndexOf("/");
-		if (slash > 0) {
-			const dir = path.slice(0, slash);
-			if (!(await this.app.vault.adapter.exists(dir))) {
-				await this.app.vault.adapter.mkdir(dir);
-			}
-		}
-		await this.app.vault.adapter.writeBinary(path, plain);
-		this.index.set(path, {
-			base_rev: entry.rev,
-			base_hash: hash || actual,
-			plain_hash: plainHash,
-			local_hash: plainHash,
-			mtime: entry.mtime,
-		});
 	}
 
 	private reportError(what: string, e: unknown): void {

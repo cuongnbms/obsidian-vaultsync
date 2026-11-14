@@ -205,9 +205,7 @@ const en: Dict = {
 	"status.pullSummary": "downloaded {downloaded}, skipped {skipped}, copies kept {kept} in {secs}s",
 
 	"error.pull": "Download",
-	"error.corruptDownload": "corrupt download of {path}: expected {want}, got {got}",
 
-	"conflict.label": "this device",
 };
 
 const ru: Dict = {
@@ -402,9 +400,7 @@ const ru: Dict = {
 	"status.pullSummary": "скачано {downloaded}, пропущено {skipped}, копий сохранено {kept} за {secs}с",
 
 	"error.pull": "Скачивание",
-	"error.corruptDownload": "битая загрузка {path}: ожидали {want}, получили {got}",
 
-	"conflict.label": "это устройство",
 };
 
 const locales: Record<string, Dict> = { ru };

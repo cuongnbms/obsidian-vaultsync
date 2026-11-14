@@ -1777,6 +1777,116 @@ test("a conflict copy an older version uploaded is deleted everywhere once resol
 	assert.equal(log.entries.find((e) => e.path === copy)?.deleted, true);
 });
 
+// --- Download everything ---------------------------------------------------------
+
+/** Every path in the vault apart from the index. */
+async function vaultPaths(device) {
+	return Object.keys(await device.vault.snapshot())
+		.filter((p) => !p.startsWith(".index"))
+		.sort();
+}
+
+test("download everything makes no backup of a file that is already the same", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	await a.edit("note.md", "the same on both\n");
+	await a.sync();
+	// A device that has the file but has never synced it.
+	await b.vault.write("note.md", "the same on both\n");
+
+	const report = await b.engine.pullAll();
+	assert.equal(report.kept, 0, JSON.stringify(report));
+	assert.deepEqual(await vaultPaths(b), ["note.md"]);
+	assert.equal(b.index.get("note.md")?.dirty ?? false, false);
+});
+
+test("download everything keeps a differing file aside, on this device only", async (t) => {
+	const { server, a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	await a.edit("note.md", "the server's version\n");
+	await a.sync();
+	await b.vault.write("note.md", "this device's version\n");
+
+	const report = await b.engine.pullAll();
+	assert.equal(report.kept, 1, JSON.stringify(report));
+	assert.equal(await b.vault.read("note.md"), "the server's version\n");
+	const backup = (await vaultPaths(b)).find((p) => p !== "note.md");
+	assert.ok(backup, "the local version is kept aside");
+	assert.equal(await b.vault.read(backup), "this device's version\n");
+
+	await b.sync();
+	await a.sync();
+	assert.equal(await a.vault.exists(backup), false, "the backup must not be uploaded");
+	const log = await server.rawChanges(server.tokens.a);
+	assert.deepEqual(log.entries.map((e) => e.path), ["note.md"]);
+	assert.equal(await b.vault.read(backup), "this device's version\n");
+});
+
+test("download everything leaves a deletion for the next sync instead of resurrecting the file", async (t) => {
+	const { server, a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	await a.edit("gone.md", "deleted on the mac\n");
+	await a.sync();
+	await b.sync();
+	await a.delete("gone.md");
+	await a.sync();
+
+	await b.engine.pullAll();
+	assert.equal(await b.vault.read("gone.md"), "deleted on the mac\n", "a download never deletes");
+
+	await b.sync();
+	assert.equal(await b.vault.exists("gone.md"), false, "the next sync applies the deletion");
+	await a.sync();
+	assert.equal(await a.vault.exists("gone.md"), false, "and the file does not come back");
+	const log = await server.rawChanges(server.tokens.a);
+	assert.equal(log.entries.find((e) => e.path === "gone.md")?.deleted, true);
+});
+
+test("download everything fetches a large file in slices", async (t) => {
+	const server = await startServer();
+	const a = await makeDevice(server, "desktop", server.tokens.a);
+	const b = await makeDevice(server, "phone", server.tokens.b, { chunkBytes: 64 * 1024 });
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	const big = new Uint8Array(300 * 1024);
+	for (let i = 0; i < big.length; i++) big[i] = (i * 13) & 0xff;
+	await a.vault.writeBinary("deck.pptx", big.buffer);
+	await a.sync();
+
+	await b.engine.pullAll();
+	assert.ok(
+		b.logs.some((l) => /fetching deck\.pptx in 5 slices/.test(l)),
+		`expected a sliced fetch, got:\n${b.logs.join("\n")}`,
+	);
+	const got = new Uint8Array(await b.vault.readBinary("deck.pptx"));
+	assert.ok(got.length === big.length && got.every((v, i) => v === big[i]));
+});
+
+test("download everything answers to the same barrier as a sync", async (t) => {
+	const server = await startServer();
+	const a = await makeDevice(server, "desktop", server.tokens.a);
+	const b = await makeDevice(server, "phone", server.tokens.b, { guard: () => "the vault is locked" });
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	await a.edit("note.md", "hidden\n");
+	await a.sync();
+
+	const report = await b.engine.pullAll();
+	assert.equal(report.barrier, "the vault is locked");
+	assert.deepEqual(await vaultPaths(b), []);
+});
+
 /**
  * A device whose next pass stops inside its first request to the change log until
  * released. Everything else goes through untouched.
@@ -1885,4 +1995,31 @@ test("resolving a conflict waits for a running pass instead of interleaving with
 	assert.equal(await b.vault.exists(copy), false);
 	await a.sync();
 	assert.equal(await a.vault.read("note.md"), "from the phone\n");
+});
+
+test("download everything waits for a running pass instead of interleaving with it", async (t) => {
+	const server = await startServer();
+	const a = await makeDevice(server, "mac", server.tokens.a);
+	const b = await deviceWithHeldPass(server, "iphone", server.tokens.b);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	await a.edit("note.md", "from the server\n");
+	await a.sync();
+
+	const { pass, release } = await b.startHeldPass();
+	let pulled = false;
+	const pulling = b.engine.pullAll().then(() => {
+		pulled = true;
+	});
+	await new Promise((r) => setTimeout(r, 200));
+	assert.equal(pulled, false, "the download must wait for the pass");
+
+	release();
+	await pass;
+	await pulling;
+	assert.equal(await b.vault.read("note.md"), "from the server\n");
 });

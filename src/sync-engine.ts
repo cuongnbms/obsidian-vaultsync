@@ -54,6 +54,19 @@ function emptyReport(): SyncReport {
 	};
 }
 
+/** What "Download everything" did. */
+export interface PullAllReport {
+	downloaded: number;
+	/** Files that differed, taken from the server with the local version kept aside. */
+	kept: number;
+	skipped: number;
+	/** Deletions left for the next sync, which applies them only to untouched files. */
+	left: number;
+	errors: string[];
+	/** Why nothing was done at all, when something stopped it. */
+	barrier?: string;
+}
+
 /** What encryptInPlace needs beyond the engine's own dependencies. */
 export interface EncryptInPlaceArgs {
 	/** Talks to the server by the names it holds now: the readable ones. */
@@ -638,6 +651,158 @@ export class SyncEngine {
 		const q = this.queued;
 		this.queued = false;
 		return q;
+	}
+
+	// --- download everything ----------------------------------------------------
+
+	/**
+	 * Take the whole vault from the server without sending anything back.
+	 *
+	 * What you run on a new device. It never deletes a local file: anything that
+	 * differs from the server is kept aside first, on this device only. A deletion
+	 * the server has and this device has not applied yet is left for the next sync,
+	 * which applies it to an untouched file and lets an edited one win, as always.
+	 * Dropping it here instead left the file behind unknown to the index, and the
+	 * next pass uploaded it over the deletion.
+	 *
+	 * Waits for a running pass, and answers to the same barrier.
+	 */
+	async pullAll(): Promise<PullAllReport> {
+		return this.exclusive(() => this.pullAllHeld());
+	}
+
+	private async pullAllHeld(): Promise<PullAllReport> {
+		const out: PullAllReport = { downloaded: 0, kept: 0, skipped: 0, left: 0, errors: [] };
+		try {
+			await this.pruneConflicts();
+			const barrier = await this.deps.guard(true);
+			if (barrier) {
+				out.barrier = barrier;
+				return out;
+			}
+			// After the guard, for the reason given in runPass.
+			const client = this.deps.client();
+			if (!client) return out;
+			await this.resetCursorIfCipherChanged();
+			this.passCipher = this.deps.cipher();
+			this.phase = "pull";
+			// Deletions up to here were already offered to a pass and decided there.
+			const seen = this.deps.index.lastSeq;
+			const failures = emptyReport();
+			let lastCheckpoint = Date.now();
+			let since = 0;
+			for (;;) {
+				const page = await client.changes(since, 200);
+				for (const entry of page.entries) {
+					if (this.deps.stopped()) return out;
+					const path = toNFC(entry.path);
+					if (this.isExcluded(path) || this.deps.index.renames.some((r) => r.from === path)) {
+						out.skipped++;
+						continue;
+					}
+					try {
+						out[await this.takeOneWay(client, entry, path, entry.seq > seen)]++;
+					} catch (e) {
+						// Tried again ahead of the next pass, exactly as a pull would.
+						this.defer(path, entry, e, failures);
+					}
+					this.deps.onProgress?.(out.downloaded + out.kept, 0, path);
+					if (Date.now() - lastCheckpoint > 2000) {
+						lastCheckpoint = Date.now();
+						await this.deps.index.save();
+					}
+				}
+				since = page.next_seq;
+				if (!page.has_more) break;
+			}
+			// Everything up to here was taken in, kept aside, or parked for the next
+			// pass. A run cut short leaves the cursor where it was.
+			this.deps.index.setLastSeq(since);
+			out.errors = failures.errors;
+			return out;
+		} finally {
+			this.phase = "idle";
+			this.passCipher = null;
+			await this.deps.index.save();
+		}
+	}
+
+	private async takeOneWay(
+		client: SyncClient,
+		entry: ChangeEntry,
+		path: string,
+		unseen: boolean,
+	): Promise<"downloaded" | "kept" | "skipped" | "left"> {
+		const adapter = this.deps.app.vault.adapter;
+		if (entry.folder) {
+			if (!(await adapter.exists(path))) await adapter.mkdir(path);
+			this.deps.index.set(path, {
+				base_rev: entry.rev,
+				base_hash: "",
+				local_hash: "",
+				mtime: entry.mtime,
+				folder: true,
+			});
+			return "downloaded";
+		}
+		if (entry.deleted) {
+			if (!(await adapter.exists(path))) {
+				this.deps.index.remove(path);
+				return "skipped";
+			}
+			if (!unseen) return "skipped";
+			// The next pass's pull starts with these, under the ordinary rule.
+			this.deps.index.defer({
+				path,
+				entry: entry as unknown as Record<string, unknown>,
+				seq: entry.seq,
+				attempts: 0,
+				next_try: 0,
+				error: "deletion left for the next sync by Download everything",
+			});
+			this.trace(`download everything left the deletion of ${path} for the next sync`);
+			return "left";
+		}
+		if (!(await adapter.exists(path))) {
+			await this.download(client, entry, path);
+			return "downloaded";
+		}
+		const local = await adapter.readBinary(path);
+		const localHash = await sha256(local);
+		if (await this.matchesRemote(local, entry.hash)) {
+			this.deps.index.set(path, {
+				base_rev: entry.rev,
+				base_hash: entry.hash ?? "",
+				plain_hash: localHash,
+				local_hash: localHash,
+				mtime: entry.mtime,
+			});
+			return "skipped";
+		}
+		// Unchanged since this device last had it from the server: nothing of its
+		// own to keep.
+		if (this.deps.index.get(path)?.plain_hash === localHash) {
+			await this.download(client, entry, path);
+			return "downloaded";
+		}
+		const backup = await this.freeName(conflictName(path, this.deviceName(), new Date()));
+		await this.writeLocalOnly(backup, local);
+		await this.download(client, entry, path);
+		this.trace(`download everything kept ${path} aside as ${backup}`);
+		return "kept";
+	}
+
+	/** name, or name with a number added, whichever is not on disk yet. */
+	private async freeName(name: string): Promise<string> {
+		const adapter = this.deps.app.vault.adapter;
+		if (!(await adapter.exists(name))) return name;
+		const dot = name.lastIndexOf(".");
+		const slash = name.lastIndexOf("/");
+		const [stem, ext] = dot > slash ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+		for (let n = 2; ; n++) {
+			const candidate = `${stem} ${n}${ext}`;
+			if (!(await adapter.exists(candidate))) return candidate;
+		}
 	}
 
 	// --- pull -----------------------------------------------------------------
