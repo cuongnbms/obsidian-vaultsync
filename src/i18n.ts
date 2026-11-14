@@ -27,7 +27,8 @@ const en: Dict = {
 	"settings.device.desc":
 		"Used in conflict copy names, so you can tell which device an edit came from.",
 	"settings.excludes.name": "Exclusions",
-	"settings.excludes.desc": "One path or prefix per line. These files never leave this device.",
+	"settings.excludes.desc":
+		"One path or prefix per line. These files never leave this device. A line matches every path that starts with it, so end a folder with / (Private/), or Private also excludes Private notes.md.",
 
 	"conflict.title": "Files changed on both sides",
 	"conflict.none": "Nothing to decide. Every file is in step.",
@@ -225,7 +226,8 @@ const ru: Dict = {
 	"settings.device.desc":
 		"Подставляется в имена конфликтных копий, чтобы было видно, откуда правка.",
 	"settings.excludes.name": "Исключения",
-	"settings.excludes.desc": "По строке на путь или префикс. Эти файлы не уезжают с устройства.",
+	"settings.excludes.desc":
+		"По строке на путь или префикс. Эти файлы не уезжают с устройства. Строка исключает всё, что с неё начинается, поэтому папку заканчивай на / (Private/), иначе Private исключит и Private notes.md.",
 
 	"conflict.title": "Файлы, изменённые с двух сторон",
 	"conflict.none": "Решать нечего. Все файлы идут в ногу.",

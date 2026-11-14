@@ -57,6 +57,10 @@ Sync now, pressed while a sync or another operation was running, did nothing and
 said nothing. The plugin now says it is busy and syncs once the running work is
 done.
 
+The Exclusions setting now says that a line matches every path starting with it,
+so a folder is written with a trailing slash: `Private` also excludes
+`Private notes.md`, and `Private/` does not. Matching itself is unchanged.
+
 ## 1.0.10
 
 A file created again at a path that had been deleted never reached the server, and
