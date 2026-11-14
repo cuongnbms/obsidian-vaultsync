@@ -14,3 +14,4 @@ test/_*.js
 /BACKLOG.md
 
 *.tgz
+.worktrees/
