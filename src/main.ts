@@ -976,7 +976,11 @@ export default class LockstepPlugin extends Plugin {
 		const barrier = this.cipherStatus !== "" && report.errors.includes(this.cipherStatus);
 		this.setStatus(barrier ? this.cipherStatus : line);
 		if (barrier) {
-			if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
+			// The other barriers announce themselves from the guard; this one does not,
+			// since offline it would on every pass, so a sync asked for by hand says it.
+			if (!quiet && this.cipherStatus === t("status.keyUnknown")) {
+				new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
+			}
 		} else if (!quiet || report.conflicts > 0) {
 			new Notice(t("notice.syncDone", { summary: line }));
 		}

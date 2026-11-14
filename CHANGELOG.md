@@ -29,7 +29,8 @@ device, but the next sync uploaded it, and it appeared on every other device, no
 of which could resolve it. Conflict copies now stay where they were made, as do the
 backups that Download everything keeps aside. A copy renamed by hand syncs under
 its new name. A copy an older version already uploaded is still removed from the
-server when its conflict is resolved.
+server when its conflict is resolved. Two conflicts on the same note within one
+minute no longer write the second copy over the first.
 
 Download everything from the server bypassed the protections of a normal sync. It
 could run during a sync, fetched large files in one request rather than in slices

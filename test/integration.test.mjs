@@ -1756,6 +1756,24 @@ test("an earlier conflict copy stays local when the same note conflicts again", 
 	assert.deepEqual(log.entries.map((e) => e.path), ["note.md"]);
 });
 
+test("two conflicts on one note within a minute keep both copies", async (t) => {
+	// The copy's name only goes down to the minute. Kept on this device alone, a
+	// copy written over by the next one is gone for good.
+	const { server, a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const first = await sameLineConflict(a, b, " 1");
+	const second = await sameLineConflict(a, b, " 2");
+	assert.notEqual(second, first);
+	assert.equal(await b.vault.read(first), "from the phone 1\n");
+	assert.equal(await b.vault.read(second), "from the phone 2\n");
+
+	await b.sync();
+	await a.sync();
+	const log = await server.rawChanges(server.tokens.a);
+	assert.deepEqual(log.entries.map((e) => e.path), ["note.md"]);
+});
+
 test("a conflict copy an older version uploaded is deleted everywhere once resolved", async (t) => {
 	const { server, a, b, cleanup } = await twoDevices();
 	t.after(cleanup);

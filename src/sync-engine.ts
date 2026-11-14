@@ -1643,7 +1643,9 @@ export class SyncEngine {
 		mergeable = false,
 		serverDevice = "",
 	): Promise<void> {
-		const copy = conflictName(path, this.deviceName(), new Date());
+		// The name only goes down to the minute, and a copy kept on this device alone
+		// that the next one lands on is gone for good.
+		const copy = await this.freeName(conflictName(path, this.deviceName(), new Date()));
 		// The copy exists for the person, not for the sync, and uploading it would
 		// spread one device's confusion to every other, none of which holds the
 		// conflict it belongs to.
