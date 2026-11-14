@@ -555,9 +555,6 @@ export class SyncEngine {
 				if (await adapter.exists(path)) onDisk.add(path);
 			}
 			const queue = [...onDisk].sort((a, b) => weight(a) - weight(b) || a.localeCompare(b));
-			let done = 0;
-			let next = 0;
-			let lastCheckpoint = Date.now();
 			const one = async (path: string): Promise<void> => {
 				if (this.isFolder(path)) return;
 				const data = await adapter.readBinary(path);
@@ -588,20 +585,7 @@ export class SyncEngine {
 				out.uploaded++;
 				this.trace(`encrypted ${path} (${data.byteLength} bytes)`);
 			};
-			const worker = async (): Promise<void> => {
-				while (next < queue.length) {
-					if (this.deps.stopped()) throw new Error("stopped");
-					const path = queue[next++] as string;
-					await one(path);
-					done++;
-					this.deps.onProgress?.(done, queue.length, path);
-					if (Date.now() - lastCheckpoint > 2000) {
-						lastCheckpoint = Date.now();
-						await this.deps.index.save();
-					}
-				}
-			};
-			await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
+			await this.inParallel(queue, one, "throw");
 			await this.deps.index.save();
 
 			// 3. The readable copies go, files before the folders that held them.
@@ -770,7 +754,7 @@ export class SyncEngine {
 			// The next pass's pull starts with these, under the ordinary rule.
 			this.deps.index.defer({
 				path,
-				entry: entry as unknown as Record<string, unknown>,
+				entry,
 				seq: entry.seq,
 				attempts: 0,
 				next_try: 0,
@@ -889,7 +873,7 @@ export class SyncEngine {
 		const wait = Math.min(base * 2 ** (attempts - 1), 60 * 60_000);
 		this.deps.index.defer({
 			path,
-			entry: entry as unknown as Record<string, unknown>,
+			entry,
 			seq: entry.seq,
 			attempts,
 			next_try: Date.now() + wait,
@@ -905,7 +889,7 @@ export class SyncEngine {
 		for (const d of [...this.deps.index.deferred]) {
 			if (this.deps.stopped()) return;
 			if (d.next_try > Date.now()) continue;
-			const entry = d.entry as unknown as ChangeEntry;
+			const entry = d.entry;
 			// A later change for the same path has arrived and been applied since;
 			// the old one would only roll it back.
 			const known = this.deps.index.get(d.path);
@@ -1430,9 +1414,6 @@ export class SyncEngine {
 			// readable there within the first minute, while the PDFs are still coming.
 			// That minute is where somebody decides whether this works.
 			.sort((a, b) => weight(a) - weight(b) || a.localeCompare(b));
-		let done = 0;
-		let next = 0;
-		let lastCheckpoint = Date.now();
 
 		const one = async (path: string): Promise<void> => {
 			const entry = this.deps.index.get(path);
@@ -1478,25 +1459,45 @@ export class SyncEngine {
 			}
 		};
 
-		// A few files in flight at once. Each upload spends most of its time waiting
-		// on the network, and a vault of small notes sent strictly one after another
-		// ran at one file per round trip. The index is checkpointed on a clock rather
-		// than per file: a kill mid-batch loses at most two seconds of bookkeeping,
-		// and every file it forgets is simply sent again.
+		await this.inParallel(pending, one, "finish");
+		if (pending.length > 0) await this.deps.index.save();
+	}
+
+	/**
+	 * Run one over every path, a few files in flight at once, with progress.
+	 *
+	 * Each upload spends most of its time waiting on the network, and a vault of
+	 * small notes sent strictly one after another ran at one file per round trip.
+	 * The index is checkpointed on a clock rather than per file: a kill mid-batch
+	 * loses at most two seconds of bookkeeping, and every file it forgets is simply
+	 * sent again. Once the plugin is stopping no new path is started; "throw" makes
+	 * that an error for the caller, "finish" returns as if the list had ended.
+	 */
+	private async inParallel(
+		paths: string[],
+		one: (path: string) => Promise<void>,
+		onStop: "throw" | "finish",
+	): Promise<void> {
+		let next = 0;
+		let done = 0;
+		let lastCheckpoint = Date.now();
 		const worker = async (): Promise<void> => {
-			while (next < pending.length && !this.deps.stopped()) {
-				const path = pending[next++] as string;
+			while (next < paths.length) {
+				if (this.deps.stopped()) {
+					if (onStop === "throw") throw new Error("stopped");
+					return;
+				}
+				const path = paths[next++] as string;
 				await one(path);
 				done++;
-				this.deps.onProgress?.(done, pending.length, path);
+				this.deps.onProgress?.(done, paths.length, path);
 				if (Date.now() - lastCheckpoint > 2000) {
 					lastCheckpoint = Date.now();
 					await this.deps.index.save();
 				}
 			}
 		};
-		await Promise.all(Array.from({ length: Math.min(4, pending.length) }, worker));
-		if (pending.length > 0) await this.deps.index.save();
+		await Promise.all(Array.from({ length: Math.min(4, paths.length) }, worker));
 	}
 
 	private async upload(

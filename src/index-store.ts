@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { DataAdapter } from "obsidian";
+import type { ChangeEntry } from "./api";
 
 /**
  * The local index: which revision the client based each path on.
@@ -68,7 +69,7 @@ export interface PendingConflict {
  */
 export interface DeferredChange {
 	path: string;
-	entry: Record<string, unknown>;
+	entry: ChangeEntry;
 	seq: number;
 	attempts: number;
 	/** Unix ms before which it is not worth trying again. */

@@ -402,9 +402,6 @@ export default class LockstepPlugin extends Plugin {
 	 * The key parameters live on the server, so the first device to enable encryption
 	 * writes them and every other device reads them and checks the passphrase against
 	 * them. That is what makes a second device able to join knowing only the words.
-	 */
-	/**
-	 * Bring encryption into the state the settings ask for.
 	 *
 	 * Several things call this: loading, leaving the passphrase field, pressing the
 	 * button, and every pass that finds the vault locked. On a phone the button press
