@@ -1136,6 +1136,9 @@ export class SyncEngine {
 			await this.dropSlices(path);
 			throw new Error(`corrupt download: expected ${expectHash}, got ${cipherHash}`);
 		}
+		// Also after a whole-file fetch: a sliced download of this path that was cut off
+		// leaves slices behind, and when the file is next fetched whole (it shrank) this
+		// is the only place they go. It costs a hash of the name and one exists.
 		await this.dropSlices(path);
 		const plain = await this.cipher().decrypt(got.data);
 		return { plain, cipherHash, plainHash: await sha256(plain), rev: got.rev || rev || 0 };
