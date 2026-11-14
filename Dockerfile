@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY server/go.mod server/go.sum ./
 RUN go mod download
