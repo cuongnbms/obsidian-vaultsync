@@ -1704,6 +1704,79 @@ test("a pass that unlocks during its own guard still translates every name", asy
 	assert.deepEqual(names, ["notes/plan.md"], `ciphertext names leaked into the vault: ${names}`);
 });
 
+/** A same-line conflict on note.md, recorded on b. Returns the copy's path. */
+async function sameLineConflict(a, b, round = "") {
+	await a.edit("note.md", `shared${round}\n`);
+	await a.sync();
+	await b.sync();
+	await a.edit("note.md", `from the mac${round}\n`);
+	await b.edit("note.md", `from the phone${round}\n`);
+	await a.sync();
+	await b.sync();
+	const copy = b.index.conflicts.find((c) => c.path === "note.md")?.copy;
+	assert.ok(copy, "a conflict was recorded");
+	return copy;
+}
+
+test("a conflict copy stays on the device that made it", async (t) => {
+	// The copy exists for the person who has to choose, not for the sync. Uploaded,
+	// it reached every device, none of which held a conflict to resolve it by.
+	const { server, a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const copy = await sameLineConflict(a, b);
+	await b.sync();
+	await a.sync();
+
+	assert.equal(await b.vault.read(copy), "from the phone\n", "the copy is kept here");
+	assert.equal(await a.vault.exists(copy), false, "and nowhere else");
+	const log = await server.rawChanges(server.tokens.a);
+	assert.deepEqual(log.entries.map((e) => e.path), ["note.md"]);
+	assert.equal(b.index.get(copy), undefined, "the copy is not tracked");
+});
+
+test("an earlier conflict copy stays local when the same note conflicts again", async (t) => {
+	// Only one pending conflict is kept per note, so the first copy is no longer
+	// named by any conflict once the second is recorded.
+	const { server, a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const first = await sameLineConflict(a, b, " 1");
+	// The copy's name carries the device and the minute; a new device name keeps the
+	// second copy from landing on the first within the same minute.
+	b.settings.deviceName = "iphone 2";
+	const second = await sameLineConflict(a, b, " 2");
+	assert.notEqual(second, first);
+	await b.sync();
+	await a.sync();
+
+	assert.equal(await b.vault.read(first), "from the phone 1\n");
+	assert.equal(await a.vault.exists(first), false, "the first copy must not be adopted");
+	const log = await server.rawChanges(server.tokens.a);
+	assert.deepEqual(log.entries.map((e) => e.path), ["note.md"]);
+});
+
+test("a conflict copy an older version uploaded is deleted everywhere once resolved", async (t) => {
+	const { server, a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	const copy = await sameLineConflict(a, b);
+	// What an earlier version did: the watcher saw the copy and sent it up.
+	await b.edit(copy, "from the phone\n");
+	await b.sync();
+	await a.sync();
+	assert.equal(await a.vault.read(copy), "from the phone\n", "the legacy upload reached the mac");
+
+	await b.engine.resolveConflict("note.md", "server");
+	await b.sync();
+	await a.sync();
+
+	assert.equal(await b.vault.exists(copy), false);
+	assert.equal(await a.vault.exists(copy), false, "the removal must reach the other device");
+	const log = await server.rawChanges(server.tokens.a);
+	assert.equal(log.entries.find((e) => e.path === copy)?.deleted, true);
+});
+
 /**
  * A device whose next pass stops inside its first request to the change log until
  * released. Everything else goes through untouched.

@@ -768,6 +768,9 @@ export default class LockstepPlugin extends Plugin {
 	private markDirty(rawPath: string): void {
 		const path = toNFC(rawPath);
 		if (this.engine.isSuppressed(path) || this.engine.isExcluded(path)) return;
+		// A conflict copy or backup, edited by the person: still theirs, still not sent.
+		// Renaming one to a name of their own is what takes it into the sync.
+		if (this.engine.isLocalOnly(path)) return;
 		const known = this.index.get(path);
 
 		// A path the server has never seen, disappearing. There is nothing to report:

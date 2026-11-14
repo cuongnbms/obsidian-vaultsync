@@ -229,6 +229,37 @@ export class SyncEngine {
 		return this.suppressed.has(path);
 	}
 
+	/**
+	 * True for a file the plugin wrote for the person and keeps off the server, a
+	 * conflict copy or a backup, that nothing has sent yet. Neither the watcher nor
+	 * the pass may take it up. One an older version already uploaded is tracked and
+	 * syncs as any other file, so that its removal still reaches the server.
+	 */
+	isLocalOnly(path: string): boolean {
+		return !this.deps.index.get(path) && this.deps.index.localOnly.includes(path);
+	}
+
+	/** Write a file for the person, alongside the one the sync owns, and keep it here. */
+	private async writeLocalOnly(path: string, data: ArrayBuffer): Promise<void> {
+		await this.write(path, data);
+		this.deps.index.remove(path);
+		this.deps.index.keepLocal(path);
+	}
+
+	/**
+	 * Remove a copy the person no longer needs. If an older version uploaded it, the
+	 * removal goes to the server too: only the watcher would have said so, and it
+	 * may not be listening.
+	 */
+	private async removeCopy(path: string): Promise<void> {
+		const adapter = this.deps.app.vault.adapter;
+		if (await adapter.exists(path)) await adapter.remove(path);
+		this.deps.index.forgetLocal(path);
+		const known = this.deps.index.get(path);
+		if (known && known.base_rev > 0) this.deps.index.set(path, { ...known, dirty: true });
+		else this.deps.index.remove(path);
+	}
+
 	private async write(path: string, data: ArrayBuffer): Promise<void> {
 		this.suppressed.add(path);
 		try {
@@ -491,7 +522,7 @@ export class SyncEngine {
 			this.passCipher = args.cipher;
 			const onDisk = new Set<string>();
 			for (const path of [...this.deps.listLocalFiles(), ...this.deps.index.paths()]) {
-				if (this.isExcluded(path) || this.deps.index.get(path)?.folder) continue;
+				if (this.isExcluded(path) || this.deps.index.get(path)?.folder || this.isLocalOnly(path)) continue;
 				if (await adapter.exists(path)) onDisk.add(path);
 			}
 			const queue = [...onDisk].sort((a, b) => weight(a) - weight(b) || a.localeCompare(b));
@@ -592,6 +623,11 @@ export class SyncEngine {
 			this.deps.index.clearConflict(conflict.path);
 			changed = true;
 			this.deps.log(`forgot a conflict whose copy was deleted: ${conflict.path}`);
+		}
+		for (const path of this.deps.index.localOnly) {
+			if (await adapter.exists(path)) continue;
+			this.deps.index.forgetLocal(path);
+			changed = true;
 		}
 		if (changed) await this.deps.index.save();
 		return changed;
@@ -1041,7 +1077,7 @@ export class SyncEngine {
 		let adopted = 0;
 		for (const path of this.deps.listLocalFiles()) {
 			const normal = toNFC(path);
-			if (this.isExcluded(normal) || this.deps.index.get(normal)) continue;
+			if (this.isExcluded(normal) || this.deps.index.get(normal) || this.isLocalOnly(normal)) continue;
 			this.deps.index.set(normal, {
 				base_rev: 0,
 				base_hash: "",
@@ -1429,7 +1465,10 @@ export class SyncEngine {
 		serverDevice = "",
 	): Promise<void> {
 		const copy = conflictName(path, this.deviceName(), new Date());
-		await this.write(copy, localData);
+		// The copy exists for the person, not for the sync, and uploading it would
+		// spread one device's confusion to every other, none of which holds the
+		// conflict it belongs to.
+		await this.writeLocalOnly(copy, localData);
 		await this.write(path, server.data);
 		this.deps.index.set(path, {
 			base_rev: server.rev,
@@ -1438,9 +1477,6 @@ export class SyncEngine {
 			local_hash: server.plainHash ?? "",
 			mtime: Date.now(),
 		});
-		// The copy is deliberately not tracked. It exists for the person, not for the
-		// sync, and uploading it would spread one device's confusion to every other.
-		this.deps.index.remove(copy);
 		this.deps.index.addConflict({
 			path,
 			copy,
@@ -1516,7 +1552,7 @@ export class SyncEngine {
 		const adapter = this.deps.app.vault.adapter;
 
 		if (choice === "server") {
-			if (await adapter.exists(pending.copy)) await adapter.remove(pending.copy);
+			await this.removeCopy(pending.copy);
 			this.deps.index.clearConflict(path);
 			await this.deps.index.save();
 			return;
@@ -1554,7 +1590,7 @@ export class SyncEngine {
 		await this.write(path, data);
 		const entry = this.deps.index.get(path);
 		await this.send(client, path, entry?.base_rev ?? pending.server_rev, data, await sha256(data));
-		if (await adapter.exists(pending.copy)) await adapter.remove(pending.copy);
+		await this.removeCopy(pending.copy);
 		this.deps.index.clearConflict(path);
 		await this.deps.index.save();
 	}
