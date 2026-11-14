@@ -327,7 +327,9 @@ export class SyncEngine {
 				// a desktop while phones, on a different adapter, cleaned up fine.
 				await adapter.rmdir(dir, true);
 				this.trace(`pruned empty folder ${dir}`);
-				window.setTimeout(() => this.suppressed.delete(dir), 1500);
+				// dir moves on to the parent before this fires, so the timer keeps its own copy.
+				const pruned = dir;
+				window.setTimeout(() => this.suppressed.delete(pruned), 1500);
 			} catch (e) {
 				this.trace(`could not prune ${dir}: ${e instanceof Error ? e.message : e}`);
 				return;

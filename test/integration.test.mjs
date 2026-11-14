@@ -1000,6 +1000,28 @@ test("renaming a folder does not leave the old one behind", async (t) => {
 	assert.equal(await b.vault.exists("Finance"), false, "the emptied folder stayed behind");
 });
 
+test("every folder pruned in one go stops being suppressed afterwards", async (t) => {
+	const { a, b, cleanup } = await twoDevices();
+	t.after(cleanup);
+
+	await a.edit("d1/d2/note.md", "text\n");
+	await a.sync();
+	await b.sync();
+
+	await a.delete("d1/d2/note.md");
+	await a.sync();
+	await b.sync();
+	assert.equal(await b.vault.exists("d1"), false);
+	assert.equal(b.engine.isSuppressed("d1/d2"), true, "pruning did not suppress the folder");
+
+	// Each pruned folder is suppressed only for the moment it takes to remove it.
+	// The timer used to read a variable the loop had moved on by then, so it lifted
+	// nothing and both folders stayed suppressed for good.
+	await new Promise((r) => setTimeout(r, 1700));
+	assert.equal(b.engine.isSuppressed("d1/d2"), false);
+	assert.equal(b.engine.isSuppressed("d1"), false);
+});
+
 test("a folder somebody else still uses is left alone", async (t) => {
 	const { a, b, cleanup } = await twoDevices();
 	t.after(cleanup);
