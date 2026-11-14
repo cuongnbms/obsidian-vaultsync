@@ -1,0 +1,8 @@
+# Packages younger than this many minutes (3 days) are not installed: most
+# compromised releases are caught and pulled within that window.
+minimumReleaseAge: 4320
+
+# Dependencies allowed to run install scripts. esbuild's postinstall checks that
+# its platform binary is in place.
+allowBuilds:
+  esbuild: true

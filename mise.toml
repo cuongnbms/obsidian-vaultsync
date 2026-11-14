@@ -1,0 +1,69 @@
+# obsidian-lockstep-sync: Obsidian plugin (TypeScript, pnpm) at the root, sync server
+# (Go) in server/. `mise tasks` lists the tasks, `mise run <task>` runs one.
+
+[settings]
+minimum_release_age = "3d"
+
+[tools]
+node = "26.13.1"
+pnpm = "12.18.0"
+go = "1.27.4"
+
+[tasks.setup]
+description = "Install tools and dependencies (run by hand; safe to re-run)"
+run = [
+  "mise install",
+  "pnpm install --frozen-lockfile",
+  "cd server && go mod download",
+]
+
+[tasks.dev]
+description = "Rebuild main.js on every change (esbuild watch)"
+run = "pnpm run dev"
+
+[tasks."build:server"]
+description = "Build the sync server for this machine into bin/sync-server"
+run = "make server"
+
+[tasks.build]
+description = "Build the plugin bundle (main.js) and the sync server"
+depends = ["build:server"]
+run = "pnpm run build"
+
+# The integration tests drive the real engine against a real server, so the
+# binary has to exist before they run.
+[tasks."test:plugin"]
+description = "Plugin tests: merge, encryption, two devices end to end"
+depends = ["build:server"]
+run = "pnpm test"
+
+[tasks."test:server"]
+description = "Server tests with the race detector"
+dir = "server"
+run = "go test -race ./..."
+
+[tasks.test]
+description = "Plugin and server tests"
+depends = ["test:plugin", "test:server"]
+
+[tasks.typecheck]
+description = "Type-check the plugin"
+run = "pnpm run check"
+
+[tasks.lint]
+description = "gofmt check and go vet on the server"
+dir = "server"
+run = ['test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)', "go vet ./..."]
+
+[tasks.fmt]
+description = "Format the server (gofmt)"
+dir = "server"
+run = "gofmt -w ."
+
+[tasks.check]
+description = "The gate: typecheck, lint and test"
+depends = ["typecheck", "lint", "test"]
+
+[tasks.clean]
+description = "Remove build output (bin/ and main.js, which is tracked: rebuild before committing)"
+run = "make clean"
