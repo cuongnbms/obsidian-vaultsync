@@ -136,7 +136,7 @@ func (s *Store) LiveHashes() (map[string]bool, error) {
 		`SELECT hash FROM files WHERE hash IS NOT NULL`,
 		`SELECT hash FROM revisions WHERE hash IS NOT NULL`,
 	} {
-		rows, err := s.db.Query(q)
+		rows, err := s.rdb.Query(q)
 		if err != nil {
 			return nil, err
 		}

@@ -28,6 +28,11 @@ type Sweeper struct {
 
 const defaultRetentionDays = 30
 
+// SweepGrace is how long unreferenced content is left alone by sweeps that do not
+// have to erase at once. An upload stores its content before committing the row
+// that points at it; an hour is far longer than that gap ever is.
+const SweepGrace = time.Hour
+
 func (s *Sweeper) Run(ctx context.Context) {
 	interval := s.Interval
 	if interval <= 0 {
@@ -71,12 +76,7 @@ func (s *Sweeper) once() {
 		if forgotten == 0 {
 			continue
 		}
-		live, err := files.LiveHashes()
-		if err != nil {
-			s.Log.Error("sweeper: listing content", "vault", name, "err", err)
-			continue
-		}
-		swept, err := blobs.Sweep(live, false)
+		swept, err := blobs.Sweep(files.LiveHashes, SweepGrace, false)
 		if err != nil {
 			s.Log.Error("sweeper: removing content", "vault", name, "err", err)
 			continue

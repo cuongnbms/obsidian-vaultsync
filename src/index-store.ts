@@ -123,6 +123,8 @@ export class LocalIndex {
 	private saving: Promise<void> | null = null;
 	/** The write queued behind it, shared by everyone who asked while it ran. */
 	private next: Promise<void> | null = null;
+	/** What index.json is known to hold, as written or read. Null when unknown. */
+	private written: string | null = null;
 
 	constructor(
 		private adapter: DataAdapter,
@@ -143,6 +145,9 @@ export class LocalIndex {
 				const parsed = JSON.parse(raw) as IndexFile;
 				if (parsed && parsed.version === 1 && parsed.files) {
 					this.data = { ...parsed, renames: parsed.renames ?? [], conflicts: parsed.conflicts ?? [] };
+					// Read from the main file, it already holds this. From the backup,
+					// the main file is broken and the first save has to replace it.
+					this.written = candidate === this.file ? JSON.stringify(this.data) : null;
 					return;
 				}
 			} catch {
@@ -298,6 +303,11 @@ export class LocalIndex {
 
 	private async writeNow(): Promise<void> {
 		const body = JSON.stringify(this.data);
+		// Most passes change nothing, and each ends with a save. The comparison is
+		// on the serialised index rather than a flag set by the setters: entries and
+		// queues are handed out by reference and changed in place, and a change a
+		// flag missed would be an index silently left unsaved.
+		if (body === this.written) return;
 		try {
 			if (await this.adapter.exists(this.file)) {
 				const old = await this.adapter.read(this.file);
@@ -308,5 +318,6 @@ export class LocalIndex {
 			// the index lagging behind what is actually on disk.
 		}
 		await this.adapter.write(this.file, body);
+		this.written = body;
 	}
 }

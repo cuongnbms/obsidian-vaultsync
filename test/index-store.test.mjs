@@ -81,3 +81,86 @@ test("a save that fails rejects for the caller whose changes it was writing", as
 
 	await assert.rejects(second, /disk full/);
 });
+
+/** Counts every adapter call that touches the disk. */
+function counting(adapter) {
+	const calls = { read: 0, write: 0 };
+	const { read, write } = adapter;
+	adapter.read = async (p) => {
+		calls.read++;
+		return read(p);
+	};
+	adapter.write = async (p, body) => {
+		calls.write++;
+		return write(p, body);
+	};
+	return calls;
+}
+
+// An idle pass every few seconds ends with a save. Rewriting an unchanged index,
+// and its backup copy, cost a multi-megabyte write per pass on a large vault.
+test("a save with nothing changed since the last write leaves the disk alone", async () => {
+	const adapter = slowAdapter(1);
+	const index = new LocalIndex(adapter, ".index");
+	index.set("one.md", entry);
+	await index.save();
+
+	const calls = counting(adapter);
+	await index.save();
+	await index.save();
+	assert.deepEqual(calls, { read: 0, write: 0 });
+});
+
+test("a change made through a reference the index handed out is still saved", async () => {
+	const adapter = slowAdapter(1);
+	const index = new LocalIndex(adapter, ".index");
+	index.set("one.md", { ...entry });
+	await index.save();
+
+	index.get("one.md").base_rev = 7;
+	index.renames.push({ from: "a.md", to: "b.md", base_rev: 1 });
+	await index.save();
+
+	const saved = JSON.parse(adapter.files.get(".index/index.json"));
+	assert.equal(saved.files["one.md"].base_rev, 7);
+	assert.equal(saved.renames.length, 1);
+});
+
+test("a save that failed is tried again by the next one", async () => {
+	const adapter = slowAdapter(1);
+	const index = new LocalIndex(adapter, ".index");
+	index.set("one.md", entry);
+	adapter.failWrites = true;
+	await assert.rejects(index.save(), /disk full/);
+
+	adapter.failWrites = false;
+	await index.save();
+	assert.deepEqual(savedPaths(adapter), ["one.md"]);
+});
+
+test("an index just loaded is not written back as it was", async () => {
+	const adapter = slowAdapter(1);
+	const first = new LocalIndex(adapter, ".index");
+	first.set("one.md", entry);
+	await first.save();
+
+	const index = new LocalIndex(adapter, ".index");
+	await index.load();
+	const calls = counting(adapter);
+	await index.save();
+	assert.equal(calls.write, 0);
+});
+
+test("an index loaded from its backup copy rewrites the main file on the first save", async () => {
+	const adapter = slowAdapter(1);
+	const first = new LocalIndex(adapter, ".index");
+	first.set("one.md", entry);
+	await first.save();
+	adapter.files.set(".index/index.prev.json", adapter.files.get(".index/index.json"));
+	adapter.files.set(".index/index.json", "{torn");
+
+	const index = new LocalIndex(adapter, ".index");
+	await index.load();
+	await index.save();
+	assert.deepEqual(savedPaths(adapter), ["one.md"]);
+});

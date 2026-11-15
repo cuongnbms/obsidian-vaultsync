@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -52,7 +53,24 @@ func (e *ConflictError) Error() string {
 var ErrNotFound = errors.New("not found")
 
 type Store struct {
+	// db is the one writer connection: every write and every transaction.
 	db *sql.DB
+	// rdb is read-only, for single statements outside a transaction.
+	rdb *sql.DB
+	// now is the server's clock, replaceable in tests that need a deletion dated
+	// in the past.
+	now func() time.Time
+}
+
+// SetClock replaces the clock that dates deletions. nil restores the real one. It
+// exists for tests.
+func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
+func (s *Store) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 const schema = `
@@ -99,15 +117,63 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	if err := redateTombstones(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	// Reads get a pool of their own. In WAL mode they run beside the writer and
+	// beside each other, each on a committed snapshot; on the single writer
+	// connection every download queued behind every other one and behind any
+	// write in progress. query_only makes a write sent here by mistake fail
+	// instead of racing the seq counter.
+	rdb, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)&_pragma=query_only(1)")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	rdb.SetMaxOpenConns(readConns)
+	rdb.SetMaxIdleConns(readConns)
+	return &Store{db: db, rdb: rdb}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+const readConns = 8
+
+// redateTombstones runs once per vault. Servers before 1.1.3 dated a tombstone by
+// the file's last edit, so what they left behind cannot say when it was deleted.
+// Each gets a full retention window from the upgrade: keeping a deletion a little
+// longer than asked is recoverable, erasing it early is not.
+func redateTombstones(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO meta(key,value) VALUES('tombstones_dated','1')
+		ON CONFLICT(key) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil // done before
+	}
+	if _, err := tx.Exec(`UPDATE files SET mtime=? WHERE deleted=1`, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Close() error {
+	rerr := s.rdb.Close()
+	if err := s.db.Close(); err != nil {
+		return err
+	}
+	return rerr
+}
 
 // Seq returns the current value of the global counter.
 func (s *Store) Seq() (int64, error) {
 	var v sql.NullInt64
-	err := s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key='seq'`).Scan(&v)
+	err := s.rdb.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key='seq'`).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -149,7 +215,7 @@ const fileCols = `path, rev, seq, hash, size, mtime, deleted, folder, updated_by
 // Get returns the current state of a file. A tombstone is a state too and is
 // returned as such; ErrNotFound means the path never existed.
 func (s *Store) Get(path string) (File, error) {
-	f, err := scanFile(s.db.QueryRow(`SELECT `+fileCols+` FROM files WHERE path=?`, path))
+	f, err := scanFile(s.rdb.QueryRow(`SELECT `+fileCols+` FROM files WHERE path=?`, path))
 	if errors.Is(err, sql.ErrNoRows) {
 		return File{}, ErrNotFound
 	}
@@ -162,7 +228,7 @@ func (s *Store) Changes(since int64, limit int) (entries []File, nextSeqOut int6
 	if limit <= 0 || limit > 5000 {
 		limit = 500
 	}
-	rows, err := s.db.Query(`SELECT `+fileCols+` FROM files WHERE seq > ? ORDER BY seq LIMIT ?`, since, limit)
+	rows, err := s.rdb.Query(`SELECT `+fileCols+` FROM files WHERE seq > ? ORDER BY seq LIMIT ?`, since, limit)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -233,9 +299,12 @@ func (s *Store) Delete(path string, baseRev int64, updatedBy string) (File, erro
 		if !exists {
 			return File{}, false, ErrNotFound
 		}
+		// A tombstone is dated by the server at the moment of deletion. The retention
+		// window counts from this, and carrying the last edit over instead erased a
+		// note untouched for longer than the window on the first sweep after it went.
 		next := File{
 			Path: path, Rev: cur.Rev + 1, Seq: seq, Hash: "", Size: 0,
-			Mtime: cur.Mtime, Deleted: true, Folder: cur.Folder, UpdatedBy: updatedBy,
+			Mtime: s.clock().UnixMilli(), Deleted: true, Folder: cur.Folder, UpdatedBy: updatedBy,
 		}
 		return next, true, nil
 	})
@@ -390,7 +459,7 @@ func (s *Store) Rename(from, to string, baseRev int64, updatedBy string) (File, 
 	}
 	tomb := File{
 		Path: from, Rev: src.Rev + 1, Seq: seqSrc, Hash: "", Size: 0,
-		Mtime: src.Mtime, Deleted: true, Folder: src.Folder, UpdatedBy: updatedBy,
+		Mtime: s.clock().UnixMilli(), Deleted: true, Folder: src.Folder, UpdatedBy: updatedBy,
 	}
 	if err := upsert(tx, tomb); err != nil {
 		return File{}, err
@@ -401,7 +470,7 @@ func (s *Store) Rename(from, to string, baseRev int64, updatedBy string) (File, 
 // RevisionHash returns the hash of one revision — the base for a client-side merge.
 func (s *Store) RevisionHash(path string, rev int64) (string, error) {
 	var hash sql.NullString
-	err := s.db.QueryRow(`SELECT hash FROM revisions WHERE path=? AND rev=?`, path, rev).Scan(&hash)
+	err := s.rdb.QueryRow(`SELECT hash FROM revisions WHERE path=? AND rev=?`, path, rev).Scan(&hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -418,7 +487,7 @@ func (s *Store) RevisionHash(path string, rev int64) (string, error) {
 // derivation parameters. The server never interprets these.
 func (s *Store) GetMeta(key string) (string, error) {
 	var v sql.NullString
-	err := s.db.QueryRow(`SELECT value FROM meta WHERE key=?`, "client:"+key).Scan(&v)
+	err := s.rdb.QueryRow(`SELECT value FROM meta WHERE key=?`, "client:"+key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -470,7 +539,7 @@ type Deleted struct {
 	Path string `json:"path"`
 	// The tombstone's revision, which is what a client must base a restore on.
 	Rev int64 `json:"rev"`
-	// When it was deleted, as the deleting device saw the clock.
+	// When it was deleted, by the server's clock.
 	DeletedAt int64 `json:"deleted_at"`
 	// The last revision that still has content, and what that content is.
 	ContentRev int64  `json:"content_rev"`
@@ -485,7 +554,7 @@ func (s *Store) DeletedFiles(limit int) ([]Deleted, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.rdb.Query(`
 		SELECT f.path, f.rev, f.mtime,
 		       (SELECT MAX(r.rev) FROM revisions r WHERE r.path = f.path AND r.hash IS NOT NULL),
 		       (SELECT r.hash FROM revisions r WHERE r.path = f.path AND r.hash IS NOT NULL
@@ -527,7 +596,7 @@ type Stats struct {
 
 func (s *Store) Stats() (Stats, error) {
 	var st Stats
-	err := s.db.QueryRow(`SELECT
+	err := s.rdb.QueryRow(`SELECT
 		COALESCE(SUM(CASE WHEN deleted=0 AND folder=0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN deleted=1 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN deleted=0 AND folder=1 THEN 1 ELSE 0 END),0),
@@ -536,7 +605,7 @@ func (s *Store) Stats() (Stats, error) {
 	if err != nil {
 		return st, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM revisions`).Scan(&st.Revs); err != nil {
+	if err := s.rdb.QueryRow(`SELECT COUNT(*) FROM revisions`).Scan(&st.Revs); err != nil {
 		return st, err
 	}
 	st.Seq, err = s.Seq()

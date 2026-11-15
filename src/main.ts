@@ -9,6 +9,7 @@ import { ReadOnlyOffModal, ReadOnlyOnModal } from "./read-only-modal";
 import { AddDeviceModal } from "./onboarding";
 import { EncryptionController, isUnreachable } from "./encryption-controller";
 import { t } from "./i18n";
+import { IdleBackoff } from "./backoff";
 import { LocalIndex } from "./index-store";
 import { defaultDeviceName, toNFC } from "./paths";
 import { SyncEngine, type SyncReport } from "./sync-engine";
@@ -18,14 +19,21 @@ import { DEFAULT_SETTINGS, SyncSettingsTab, type SyncSettings, defaultExcludes }
 const DEBOUNCE_MS = 2500;
 
 /**
- * How often to ask the server for changes. Fixed rather than a setting: a check
- * that finds nothing is one indexed query and forty bytes, Obsidian on a phone
- * does not run in the background, and nobody has a reason to want it slower.
+ * How often to ask the server for changes while things are happening. Each pass
+ * that moves nothing doubles the wait, up to IDLE_INTERVAL_MAX_MS; an edit here,
+ * a change that comes down, or bringing the app back to the front returns it to
+ * this. Edits made here never wait for it: they are sent after DEBOUNCE_MS.
  */
 const SYNC_INTERVAL_MS = 15_000;
+const IDLE_INTERVAL_MAX_MS = 5 * 60_000;
 
 /** How many journal lines to keep. Enough to cover a bad afternoon, not a month. */
 const JOURNAL_LINES = 2000;
+
+/** Whether a pass changed anything on either side, which keeps the checks frequent. */
+function moved(r: SyncReport): boolean {
+	return r.uploaded + r.downloaded + r.deleted + r.renamed + r.merged + r.conflicts + r.kept > 0;
+}
 
 export default class LockstepPlugin extends Plugin {
 	override settings: SyncSettings = { ...DEFAULT_SETTINGS };
@@ -44,7 +52,9 @@ export default class LockstepPlugin extends Plugin {
 	private serverEmpty: boolean | null = null;
 	/** How many files the server reported last time it was asked. */
 	private serverFiles = 0;
-	private interval: number | null = null;
+	/** The next automatic check. A timeout re-armed after each pass, not an interval. */
+	private autoTimer: number | null = null;
+	private backoff = new IdleBackoff(SYNC_INTERVAL_MS, IDLE_INTERVAL_MAX_MS);
 	/** Set on unload; a running pass stops at the next file and writes nothing more. */
 	private unloaded = false;
 
@@ -229,7 +239,18 @@ export default class LockstepPlugin extends Plugin {
 		this.registerDomEvent(window, "blur", () => void this.flush());
 		this.registerDomEvent(document, "visibilitychange", () => {
 			if (document.hidden) void this.flush();
+			else this.wakeFromIdle();
 		});
+		this.registerDomEvent(window, "focus", () => this.wakeFromIdle());
+	}
+
+	/**
+	 * Coming back to the app after a quiet spell checks at once rather than at the
+	 * end of a wait that may have grown to minutes. Switching windows right after a
+	 * pass, or while checks are at the base pace, triggers nothing extra.
+	 */
+	private wakeFromIdle(): void {
+		if (this.backoff.wake(Date.now())) void this.syncNow(true);
 	}
 
 	override onunload(): void {
@@ -240,6 +261,8 @@ export default class LockstepPlugin extends Plugin {
 		// does not share the vault with its own ghost.
 		this.unloaded = true;
 		if (this.debounce) window.clearTimeout(this.debounce);
+		if (this.autoTimer !== null) window.clearTimeout(this.autoTimer);
+		this.autoTimer = null;
 		void this.index.save();
 	}
 
@@ -750,17 +773,33 @@ export default class LockstepPlugin extends Plugin {
 	}
 
 	private scheduleSync(): void {
+		this.backoff.active();
 		if (this.debounce) window.clearTimeout(this.debounce);
 		this.debounce = window.setTimeout(() => void this.syncNow(true), DEBOUNCE_MS);
 	}
 
 	restartAutoSync(): void {
-		if (this.interval !== null) {
-			window.clearInterval(this.interval);
-			this.interval = null;
-		}
-		this.interval = window.setInterval(() => void this.syncNow(true), SYNC_INTERVAL_MS);
-		this.registerInterval(this.interval);
+		this.backoff.active();
+		this.armAutoSync();
+	}
+
+	/**
+	 * Arm the next automatic check, replacing any already armed. Called after every
+	 * pass, whatever started it, so the wait always counts from the last contact
+	 * with the server.
+	 */
+	private armAutoSync(): void {
+		if (this.autoTimer !== null) window.clearTimeout(this.autoTimer);
+		this.autoTimer = null;
+		if (this.unloaded) return;
+		this.autoTimer = window.setTimeout(() => {
+			this.autoTimer = null;
+			// A check that returns before a pass (not configured, blocked, busy) did
+			// not re-arm, so the chain is picked up here.
+			void this.syncNow(true).finally(() => {
+				if (this.autoTimer === null) this.armAutoSync();
+			});
+		}, this.backoff.delay);
 	}
 
 	/** Force a pass right now, used when the app is about to be suspended. */
@@ -791,13 +830,17 @@ export default class LockstepPlugin extends Plugin {
 			const report = await this.engine.sync(!quiet);
 			const secs = ((Date.now() - started) / 1000).toFixed(1);
 			this.report(report, secs, quiet);
+			this.backoff.finished(moved(report), Date.now());
 			if (report.uploaded + report.downloaded > 0 && report.errors.length === 0) {
 				this.lastSummary = t(this.encryption.cipher.enabled ? "progress.doneEncrypted" : "progress.done");
 				for (const el of this.progressTargets) el.setText(this.lastSummary);
 			}
 		} catch (e) {
+			// A server that cannot be reached is not asked every fifteen seconds either.
+			this.backoff.finished(false, Date.now());
 			this.reportError(t("error.sync"), e);
 		} finally {
+			this.armAutoSync();
 			this.endProgress(this.lastSummary);
 			await this.flushJournal();
 			this.syncIfAsked();

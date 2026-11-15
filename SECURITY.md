@@ -105,6 +105,15 @@ configured for, so the result can be checked rather than assumed.
 been, revoke that one device: `sync-server token revoke --name <device>`. Nothing else is
 affected.
 
+**A lost device is revoked with everything it handed out.** Any device can add another, so
+a stolen token can mint more under any name. The server records which token issued which,
+and `token list` shows it in the ISSUED BY column.
+`sync-server token revoke --name <device> --cascade` removes that device, every token it
+issued and theirs in turn, and every join link it made that is still unused. Re-add the
+devices you still have afterwards. Tokens issued before 1.1.3 carry no issuer and show `-`
+in that column: a device lost before the upgrade may have minted some, so if in doubt
+revoke every token of the vault and add your devices again.
+
 ## Verifying what you downloaded
 
 Release artefacts are built by GitHub Actions from the tagged commit, and every release

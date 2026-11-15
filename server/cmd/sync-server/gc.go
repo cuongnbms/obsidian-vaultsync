@@ -65,11 +65,10 @@ func collect(args []string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
-		live, err := files.LiveHashes()
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		swept, err := blobs.Sweep(live, *dryRun)
+		// This runs in a process of its own, beside a server that may be taking
+		// uploads, so it cannot hold them off: content younger than the grace
+		// period may belong to an upload whose row has not landed yet.
+		swept, err := blobs.Sweep(files.LiveHashes, vault.SweepGrace, *dryRun)
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}

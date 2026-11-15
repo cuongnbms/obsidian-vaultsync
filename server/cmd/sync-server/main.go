@@ -41,7 +41,7 @@ func usage() error {
 	fmt.Fprint(os.Stderr, `sync-server - self-hosted Obsidian vault sync
 
   serve   [--data DIR] [--addr HOST:PORT] [--max-upload BYTES]
-  token   add --vault NAME --name DEVICE | list [--vault NAME] | revoke --name DEVICE [--vault NAME]
+  token   add --vault NAME --name DEVICE | list [--vault NAME] | revoke --name DEVICE [--vault NAME] [--cascade]
   stats   --vault NAME
   import  --from DIR [--vault NAME] [--with-config] [--dry-run]
   gc      [--vault NAME | --all] [--keep-days N] [--keep-revisions N] [--dry-run]
@@ -196,13 +196,17 @@ func token(args []string) error {
 			fmt.Println("no tokens")
 			return nil
 		}
-		fmt.Printf("%-20s %-16s %-20s %s\n", "DEVICE", "VAULT", "CREATED", "LAST SEEN")
+		fmt.Printf("%-20s %-16s %-26s %-26s %s\n", "DEVICE", "VAULT", "CREATED", "LAST SEEN", "ISSUED BY")
 		for _, t := range toks {
 			seen := "never"
 			if t.LastSeen.Unix() > 0 {
 				seen = t.LastSeen.Format(time.RFC3339)
 			}
-			fmt.Printf("%-20s %-16s %-20s %s\n", t.Name, t.Vault, t.CreatedAt.Format(time.RFC3339), seen)
+			by := t.IssuedBy
+			if by == "" {
+				by = "-"
+			}
+			fmt.Printf("%-20s %-16s %-26s %-26s %s\n", t.Name, t.Vault, t.CreatedAt.Format(time.RFC3339), seen, by)
 		}
 		return nil
 
@@ -211,15 +215,19 @@ func token(args []string) error {
 		data := dataDir(fs)
 		name := fs.String("name", "", "device name")
 		vaultName := fs.String("vault", "", "only this vault (default: every vault with that name)")
+		cascade := fs.Bool("cascade", false, "also revoke every token and join link this device issued, and theirs (for a lost or stolen device)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		if *name == "" {
+			return errors.New("--name is required")
 		}
 		st, err := openAuth(*data)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
-		n, err := st.Revoke(*name, *vaultName)
+		n, err := st.Revoke(*name, *vaultName, *cascade)
 		if err != nil {
 			return err
 		}

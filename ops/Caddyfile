@@ -1,5 +1,9 @@
 # TLS, HTTP/2 and certificates are entirely Caddy's job. The server knows nothing of them.
 sync.example.com {
+	# The change log comes as JSON pages of hundreds of entries. Caddy's default
+	# types leave file content (application/octet-stream) alone: an encrypted
+	# vault would not shrink, and Range downloads rely on the bytes as stored.
+	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080 {
 		# Large attachments take a long time, so the body timeouts stay generous.
 		transport http {

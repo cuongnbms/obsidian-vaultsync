@@ -112,33 +112,6 @@ func TestCollectSparesRecentHistoryHoweverDeep(t *testing.T) {
 	}
 }
 
-func TestCollectForgetsOldDeletionsButNotRecentOnes(t *testing.T) {
-	files, blobs, _ := open(t)
-	write(t, files, blobs, "old.md", "gone long ago", 1, 200)
-	write(t, files, blobs, "fresh.md", "gone yesterday", 1, 200)
-
-	for _, path := range []string{"old.md", "fresh.md"} {
-		if _, err := files.Delete(path, 1, "test"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Age the tombstone on one of them.
-	if _, err := files.Put(store.PutArgs{Path: "old.md", BaseRev: 2, Hash: "", Size: 0, Mtime: daysAgo(200)}); err == nil {
-		t.Skip("resurrecting changes the shape of this test")
-	}
-
-	before, _ := files.Get("fresh.md")
-	if !before.Deleted {
-		t.Fatal("fresh.md should be a tombstone")
-	}
-	if _, err := files.Collect(store.GCPolicy{KeepDays: 30, KeepRevisions: 20, TombstoneDays: 90}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := files.Get("fresh.md"); err != nil {
-		t.Fatal("a recent deletion must stay recoverable")
-	}
-}
-
 func TestSweepRemovesOrphansAndSparesSharedContent(t *testing.T) {
 	files, blobs, _ := open(t)
 	write(t, files, blobs, "one.md", "shared body", 1, 0)
@@ -155,7 +128,7 @@ func TestSweepRemovesOrphansAndSparesSharedContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := blobs.Sweep(live, false)
+	res, err := blobs.Sweep(liveOf(live), 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +157,7 @@ func TestSweepSparesContentAnotherPathStillUses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := blobs.Sweep(live, false); err != nil {
+	if _, err := blobs.Sweep(liveOf(live), 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if !blobs.Has(sha("same text")) {
@@ -206,7 +179,7 @@ func TestDryRunChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	live, _ := files.LiveHashes()
-	if _, err := blobs.Sweep(live, true); err != nil {
+	if _, err := blobs.Sweep(liveOf(live), 0, true); err != nil {
 		t.Fatal(err)
 	}
 

@@ -40,6 +40,8 @@ type Server struct {
 	Log       *slog.Logger
 
 	mu sync.Mutex
+	// Failed attempts per client: wrong tokens, unknown join codes. Made by Handler.
+	limit *limiter
 }
 
 func (s *Server) logger() *slog.Logger {
@@ -50,6 +52,7 @@ func (s *Server) logger() *slog.Logger {
 }
 
 func (s *Server) Handler() http.Handler {
+	s.limit = newLimiter()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
 	mux.HandleFunc("GET /v1/stats", s.auth(s.stats))
@@ -87,15 +90,21 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, ctx)) http.H
 		if len(hdr) > 7 && strings.EqualFold(hdr[:7], "bearer ") {
 			raw = strings.TrimSpace(hdr[7:])
 		}
+		client := clientAddr(r)
+		if wait, blocked := s.limit.blocked(client); blocked {
+			tooMany(w, wait)
+			return
+		}
 		tok, err := s.Auth.Resolve(raw)
 		if err != nil {
+			s.limit.fail(client)
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid or missing bearer token")
 			return
 		}
 		files, blobs, err := s.Vaults.Get(tok.Vault)
 		if err != nil {
 			s.logger().Error("open vault", "vault", tok.Vault, "err", err)
-			writeErr(w, http.StatusInternalServerError, "vault_unavailable", err.Error())
+			writeErr(w, http.StatusInternalServerError, "vault_unavailable", "the server could not open this vault")
 			return
 		}
 		next(w, r, ctx{tok: tok, files: files, blobs: blobs})
@@ -166,6 +175,14 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// internal reports a server-side failure. The detail goes to the log; the client
+// gets a fixed message, since an error from the filesystem or SQLite names paths
+// and queries that are nobody's business on the other end.
+func (s *Server) internal(w http.ResponseWriter, what string, err error) {
+	s.logger().Error(what, "err", err)
+	writeErr(w, http.StatusInternalServerError, "internal", "the server failed to "+what)
+}
+
 func writeErr(w http.ResponseWriter, code int, kind, msg string) {
 	writeJSON(w, code, map[string]string{"error": kind, "message": msg})
 }
@@ -196,7 +213,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 func (s *Server) stats(w http.ResponseWriter, r *http.Request, c ctx) {
 	st, err := c.files.Stats()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -218,7 +235,7 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request, c ctx) {
 	}
 	entries, next, more, err := c.files.Changes(since, int(limit))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	if entries == nil {
@@ -239,7 +256,7 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request, c ctx) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(smallBody(w, r, 1<<10)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -248,9 +265,11 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "name must be between 1 and 64 characters")
 		return
 	}
-	token, err := s.Auth.Add(name, c.tok.Vault)
+	// Recorded as issued by the caller, so revoking it with --cascade takes this
+	// one too: a stolen token can mint as many as it likes, under any name.
+	token, err := s.Auth.Issue(name, c.tok.Vault, c.tok.ID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "issue a token", err)
 		return
 	}
 	s.logger().Info("issued a token", "vault", c.tok.Vault, "name", name, "by", c.tok.Name)
@@ -284,7 +303,7 @@ func (s *Server) putRetention(w http.ResponseWriter, r *http.Request, c ctx) {
 	var req struct {
 		Days int `json:"days"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(smallBody(w, r, 1<<10)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -293,7 +312,7 @@ func (s *Server) putRetention(w http.ResponseWriter, r *http.Request, c ctx) {
 		return
 	}
 	if err := c.files.PutMeta("retention_days", strconv.Itoa(req.Days)); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"days": req.Days})
@@ -310,7 +329,7 @@ func (s *Server) deleted(w http.ResponseWriter, r *http.Request, c ctx) {
 	}
 	list, err := c.files.DeletedFiles(int(limit))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": list})
@@ -328,7 +347,7 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request, c ctx) {
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 
@@ -349,7 +368,9 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeErr(w, http.StatusGone, "deleted", "file is deleted; request an explicit rev to read history")
 		return
 	} else if f.Folder {
-		writeErr(w, http.StatusNoContent, "folder", "path is a folder")
+		// A folder has no content. 204 carries no body, so none is written: the
+		// JSON error that used to follow was dropped by net/http anyway.
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -395,30 +416,48 @@ func (s *Server) putFile(w http.ResponseWriter, r *http.Request, c ctx) {
 	// hash, so a stray blob left by a conflict is harmless and gets collected later.
 	var hash string
 	var size int64
+	release := func() {}
 	if folder {
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 	} else {
-		hash, size, err = c.blobs.Put(r.Body, s.MaxUpload)
-		if err != nil {
+		staged, err := c.blobs.Stage(r.Body, s.MaxUpload)
+		if errors.Is(err, blob.ErrTooLarge) {
 			writeErr(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
 			return
 		}
+		if err != nil {
+			// A body cut short and a full disk end up here alike; the detail names
+			// the staging path, so it goes to the log.
+			s.internal(w, "store the upload", err)
+			return
+		}
+		defer staged.Discard()
+		// From storing the content to committing the row, no sweep may run: it
+		// would see the content as unreferenced and erase it under the new row.
+		release = c.blobs.Hold()
+		if err := staged.Commit(); err != nil {
+			release()
+			s.internal(w, "store blob", err)
+			return
+		}
+		hash, size = staged.Hash, staged.Size
 	}
 
 	f, err := c.files.Put(store.PutArgs{
 		Path: p, BaseRev: baseRev, Hash: hash, Size: size, Mtime: mtime,
 		Folder: folder, UpdatedBy: device(r, c.tok.Name),
 	})
+	release()
 	var conflict *store.ConflictError
 	if errors.As(err, &conflict) {
 		writeConflict(w, conflict)
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, fileResp(f))
@@ -447,7 +486,7 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request, c ctx) {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not_found", "no such path in vault")
 	case err != nil:
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 	default:
 		writeJSON(w, http.StatusOK, fileResp(f))
 	}
@@ -465,7 +504,7 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c ctx) {
 		return
 	}
 	var req renameReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+	if err := json.NewDecoder(smallBody(w, r, 1<<16)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -486,8 +525,10 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeConflict(w, conflict)
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not_found", "source path is missing or deleted")
+	case err != nil && from == to:
+		writeErr(w, http.StatusBadRequest, "bad_request", "from and to are the same path")
 	case err != nil:
-		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		s.internal(w, "rename", err)
 	default:
 		writeJSON(w, http.StatusOK, fileResp(f))
 	}
@@ -507,7 +548,7 @@ func (s *Server) getVaultKey(w http.ResponseWriter, r *http.Request, c ctx) {
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -518,8 +559,11 @@ func (s *Server) getVaultKey(w http.ResponseWriter, r *http.Request, c ctx) {
 		var record, marker map[string]any
 		if json.Unmarshal([]byte(value), &record) == nil && json.Unmarshal([]byte(raw), &marker) == nil {
 			// Whether the caller is the device doing it. Decided here, because only
-			// the server knows the name it filed the marker under.
-			marker["mine"] = marker["device"] == device(r, c.tok.Name)
+			// the server knows which token filed the marker; that stays here too.
+			holder, _ := marker["holder"].(string)
+			name, _ := marker["device"].(string)
+			marker["mine"] = migrationIsMine(holder, name, r, c)
+			delete(marker, "holder")
 			record["migration"] = marker
 			writeJSON(w, http.StatusOK, record)
 			return
@@ -541,18 +585,20 @@ func (s *Server) putMigration(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeErr(w, http.StatusConflict, "no_key", "set the vault key parameters first")
 		return
 	}
-	// The device is taken from the request, not the body: it has to be the same
-	// name the write handlers will compare against, and they only see requests.
+	// The holder is the token, which is what the write handlers compare against.
+	// The device name is for showing to people: it is whatever the device says it
+	// is called, and comparing it let any device sending the same name through.
 	marker, err := json.Marshal(map[string]any{
 		"device":  device(r, c.tok.Name),
+		"holder":  c.tok.ID,
 		"started": time.Now().UnixMilli(),
 	})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	if err := c.files.PutMeta("encrypting", string(marker)); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -569,11 +615,23 @@ func encryptingElsewhere(r *http.Request, c ctx) (string, bool) {
 	}
 	var m struct {
 		Device string `json:"device"`
+		Holder string `json:"holder"`
 	}
-	if json.Unmarshal([]byte(raw), &m) != nil || m.Device == device(r, c.tok.Name) {
+	if json.Unmarshal([]byte(raw), &m) != nil || migrationIsMine(m.Holder, m.Device, r, c) {
 		return "", false
 	}
 	return m.Device, true
+}
+
+// migrationIsMine says whether the caller is the device running the migration:
+// the token that set the marker. A marker from a server before 1.1.3 has no
+// holder and is matched by the device name it was filed under, so a migration in
+// flight across the upgrade keeps its lock.
+func migrationIsMine(holder, name string, r *http.Request, c ctx) bool {
+	if holder != "" {
+		return holder == c.tok.ID
+	}
+	return name == device(r, c.tok.Name)
 }
 
 func writeEncrypting(w http.ResponseWriter, from string) {
@@ -583,7 +641,7 @@ func writeEncrypting(w http.ResponseWriter, from string) {
 
 func (s *Server) clearMigration(w http.ResponseWriter, r *http.Request, c ctx) {
 	if err := c.files.DeleteMeta("encrypting"); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -600,17 +658,15 @@ func (s *Server) purgeDeleted(w http.ResponseWriter, r *http.Request, c ctx) {
 	defer s.mu.Unlock()
 	files, err := c.files.ForgetAllDeleted()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
-	live, err := c.files.LiveHashes()
+	// No grace period: the readable copies have to go now, not in an hour. The
+	// sweep holds uploads off instead, so none can land between the list of what
+	// is still needed and the erase.
+	swept, err := c.blobs.Sweep(c.files.LiveHashes, 0, false)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	swept, err := c.blobs.Sweep(live, false)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 		return
 	}
 	s.logger().Info("erased deleted files on request",
@@ -619,7 +675,7 @@ func (s *Server) purgeDeleted(w http.ResponseWriter, r *http.Request, c ctx) {
 }
 
 func (s *Server) putVaultKey(w http.ResponseWriter, r *http.Request, c ctx) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<10))
+	body, err := io.ReadAll(smallBody(w, r, 8<<10))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -633,7 +689,7 @@ func (s *Server) putVaultKey(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeErr(w, http.StatusConflict, "already_set",
 			"this vault already has key parameters; changing them would make every file unreadable")
 	case err != nil:
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "complete the request", err)
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
