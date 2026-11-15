@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.1.3
+
+A deleted note stays recoverable for the whole retention window. The window used to count
+from the note's last edit, so a note untouched for longer than the window was erased, with
+its history, on the first sweep after it was deleted. It now counts from the deletion, and
+Restore shows the date it was deleted rather than the last edit. Deletions made before this
+version cannot say when they happened; each gets a full window from the upgrade. An upload
+can no longer lose its content to a sweep running at the same moment, and content written
+to disk survives a power cut as reliably as the record that points at it.
+
+An idle device asks the server less often: the wait doubles after every check that finds
+nothing, up to five minutes, and returns to fifteen seconds on an edit, an incoming change,
+or the app coming back to the front. Edits made here are still sent within seconds. A check
+that changes nothing no longer rewrites the local index. On the server, downloads no longer
+wait for each other, and the change log is compressed by the proxy the installer sets up.
+
+A token issued from a device is recorded as issued by it, `token list` shows by whom, and
+`token revoke --cascade` removes a lost device together with every token and join link it
+handed out. The device running an encryption migration is the token that started it, not
+the name it sends, so another device can no longer write through the lock by using that
+name. Wrong tokens and join codes are slowed down per client address, small requests have to
+arrive within fifteen seconds, and server errors no longer include file paths. Both the
+plugin and the server changed; either works with the other's previous version.
+
 ## 1.1.2
 
 A device catching up on a large vault fetches new notes eight at a time instead of one

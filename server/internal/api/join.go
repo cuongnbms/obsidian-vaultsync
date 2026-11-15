@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,7 +38,7 @@ func (s *Server) createJoin(w http.ResponseWriter, r *http.Request, c ctx) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(smallBody(w, r, 1<<10)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -48,9 +47,9 @@ func (s *Server) createJoin(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "name must be between 1 and 64 characters")
 		return
 	}
-	code, err := s.Auth.CreateJoin(c.tok.Vault, name, c.tok.Name, joinTTL)
+	code, err := s.Auth.CreateJoin(c.tok.Vault, name, c.tok, joinTTL)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "make a join link", err)
 		return
 	}
 	s.logger().Info("issued a join code", "vault", c.tok.Vault, "name", name, "by", c.tok.Name)
@@ -62,20 +61,27 @@ func (s *Server) createJoin(w http.ResponseWriter, r *http.Request, c ctx) {
 }
 
 func (s *Server) redeemJoin(w http.ResponseWriter, r *http.Request) {
+	client := clientAddr(r)
+	if wait, blocked := s.limit.blocked(client); blocked {
+		tooMany(w, wait)
+		return
+	}
 	var req struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(smallBody(w, r, 1<<10)).Decode(&req); err != nil {
+		s.limit.fail(client)
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	tok, j, err := s.Auth.RedeemJoin(strings.TrimSpace(req.Code))
 	if errors.Is(err, auth.ErrJoinInvalid) {
+		s.limit.fail(client)
 		writeErr(w, http.StatusGone, "join_invalid", "this link has expired or was already used; make a new one from a device that is set up")
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internal(w, "redeem the join link", err)
 		return
 	}
 	s.logger().Info("redeemed a join code", "vault", j.Vault, "name", j.Device, "issued_by", j.IssuedBy)
@@ -94,8 +100,14 @@ func (s *Server) joinPage(w http.ResponseWriter, r *http.Request) {
 	// the phone's developer tools, by anyone who would rather not take our word.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'")
+	client := clientAddr(r)
+	if wait, blocked := s.limit.blocked(client); blocked {
+		tooMany(w, wait)
+		return
+	}
 	j, err := s.Auth.PeekJoin(code)
 	if err != nil {
+		s.limit.fail(client)
 		w.WriteHeader(http.StatusGone)
 		_ = joinTmpl.Execute(w, joinView{Expired: true})
 		return

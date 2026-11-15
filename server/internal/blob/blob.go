@@ -23,6 +23,9 @@ import (
 
 var ErrNotFound = errors.New("blob not found")
 
+// ErrTooLarge means an upload went past the size limit.
+var ErrTooLarge = errors.New("payload exceeds the size limit")
+
 var hashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // ValidHash rejects attempts to pass a path where a hash is expected.
@@ -77,7 +80,7 @@ func (s *Store) Stage(r io.Reader, limit int64) (*Staged, error) {
 	}
 	if limit > 0 && size > limit {
 		st.Discard()
-		return nil, fmt.Errorf("payload exceeds limit of %d bytes", limit)
+		return nil, fmt.Errorf("%w of %d bytes", ErrTooLarge, limit)
 	}
 	st.Hash, st.Size = hex.EncodeToString(h.Sum(nil)), size
 	return st, nil

@@ -29,21 +29,31 @@ var vaultRe = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
 func ValidVault(v string) bool { return vaultRe.MatchString(v) && v != "." && v != ".." }
 
 type Token struct {
+	// ID identifies the token without being it: the sha256 that is stored. It is
+	// what the server compares when it has to know which device is asking, since
+	// the name a device sends about itself is only what it says.
+	ID        string
 	Name      string
 	Vault     string
 	CreatedAt time.Time
 	LastSeen  time.Time
+	// The name of the token that issued this one. Empty when it was made from the
+	// terminal, "(revoked)" when its issuer has been revoked since.
+	IssuedBy string
 }
 
 type Store struct{ db *sql.DB }
 
+// issued_by on tokens is the ID of the issuing token; issued_by on join_codes is
+// the issuer's name, for the page, and issuer_id its ID.
 const schema = `
 CREATE TABLE IF NOT EXISTS tokens (
   hash       TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
   vault      TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  last_seen  INTEGER NOT NULL DEFAULT 0
+  last_seen  INTEGER NOT NULL DEFAULT 0,
+  issued_by  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_vault ON tokens(vault);
 CREATE TABLE IF NOT EXISTS join_codes (
@@ -53,7 +63,8 @@ CREATE TABLE IF NOT EXISTS join_codes (
   issued_by  TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
-  used_at    INTEGER NOT NULL DEFAULT 0
+  used_at    INTEGER NOT NULL DEFAULT 0,
+  issuer_id  TEXT NOT NULL DEFAULT ''
 );
 `
 
@@ -67,7 +78,45 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// CREATE TABLE IF NOT EXISTS leaves a table from an older server as it was.
+	for _, c := range []struct{ table, column string }{
+		{"tokens", "issued_by"},
+		{"join_codes", "issuer_id"},
+	} {
+		if err := addColumn(db, c.table, c.column); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tokens_issued_by ON tokens(issued_by)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// addColumn adds a text column defaulting to ” unless the table already has it.
+func addColumn(db *sql.DB, table, column string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -77,9 +126,15 @@ func hashToken(tok string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Add issues a new token. The plaintext value is returned exactly once — only its
-// sha256 is ever stored on disk.
+// Add issues a new token from the terminal. The plaintext value is returned
+// exactly once — only its sha256 is ever stored on disk.
 func (s *Store) Add(name, vault string) (string, error) {
+	return s.Issue(name, vault, "")
+}
+
+// Issue issues a new token on behalf of the token with ID issuer, and remembers
+// that it did, so a lost device can be revoked with everything it handed out.
+func (s *Store) Issue(name, vault, issuer string) (string, error) {
 	if !ValidVault(vault) {
 		return "", fmt.Errorf("invalid vault name %q", vault)
 	}
@@ -88,8 +143,8 @@ func (s *Store) Add(name, vault string) (string, error) {
 		return "", err
 	}
 	tok := "obs_" + base64.RawURLEncoding.EncodeToString(raw)
-	_, err := s.db.Exec(`INSERT INTO tokens(hash,name,vault,created_at) VALUES(?,?,?,?)`,
-		hashToken(tok), name, vault, time.Now().Unix())
+	_, err := s.db.Exec(`INSERT INTO tokens(hash,name,vault,created_at,issued_by) VALUES(?,?,?,?,?)`,
+		hashToken(tok), name, vault, time.Now().Unix(), issuer)
 	if err != nil {
 		return "", err
 	}
@@ -120,6 +175,7 @@ func (s *Store) Resolve(tok string) (Token, error) {
 	if subtle.ConstantTimeCompare([]byte(gotHash), []byte(h)) != 1 {
 		return Token{}, ErrUnauthorized
 	}
+	t.ID = h
 	t.CreatedAt = time.Unix(created, 0)
 	t.LastSeen = time.Unix(seen, 0)
 	// last_seen is read by a person in `token list`, to the hour at best. Writing
@@ -135,13 +191,14 @@ func (s *Store) Resolve(tok string) (Token, error) {
 // vault column is always populated so a caller listing everything can still tell
 // them apart.
 func (s *Store) List(vault string) ([]Token, error) {
-	q := `SELECT name,vault,created_at,last_seen FROM tokens ORDER BY vault, created_at`
+	q := `SELECT t.hash, t.name, t.vault, t.created_at, t.last_seen, t.issued_by, p.name
+		FROM tokens t LEFT JOIN tokens p ON p.hash = t.issued_by`
 	var rows *sql.Rows
 	var err error
 	if vault == "" {
-		rows, err = s.db.Query(q)
+		rows, err = s.db.Query(q + ` ORDER BY t.vault, t.created_at`)
 	} else {
-		rows, err = s.db.Query(`SELECT name,vault,created_at,last_seen FROM tokens WHERE vault=? ORDER BY created_at`, vault)
+		rows, err = s.db.Query(q+` WHERE t.vault=? ORDER BY t.created_at`, vault)
 	}
 	if err != nil {
 		return nil, err
@@ -151,10 +208,19 @@ func (s *Store) List(vault string) ([]Token, error) {
 	for rows.Next() {
 		var t Token
 		var created, seen int64
-		if err := rows.Scan(&t.Name, &t.Vault, &created, &seen); err != nil {
+		var issuer string
+		var issuerName sql.NullString
+		if err := rows.Scan(&t.ID, &t.Name, &t.Vault, &created, &seen, &issuer, &issuerName); err != nil {
 			return nil, err
 		}
 		t.CreatedAt, t.LastSeen = time.Unix(created, 0), time.Unix(seen, 0)
+		switch {
+		case issuer == "":
+		case issuerName.Valid:
+			t.IssuedBy = issuerName.String
+		default:
+			t.IssuedBy = "(revoked)"
+		}
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -163,18 +229,72 @@ func (s *Store) List(vault string) ([]Token, error) {
 // Revoke removes a token by device name. When vault is non-empty only that vault's
 // token is removed, so a device named the same in two vaults can be revoked from
 // one without touching the other.
-func (s *Store) Revoke(name, vault string) (int64, error) {
-	var res sql.Result
-	var err error
-	if vault == "" {
-		res, err = s.db.Exec(`DELETE FROM tokens WHERE name=?`, name)
-	} else {
-		res, err = s.db.Exec(`DELETE FROM tokens WHERE name=? AND vault=?`, name, vault)
-	}
+//
+// With cascade, every token the revoked ones issued goes too, and the tokens those
+// issued, and every unspent join link any of them made. That is the answer to a
+// lost or stolen device, which could have handed itself as many tokens as it
+// liked under any names. Without it, devices the revoked one set up keep working.
+func (s *Store) Revoke(name, vault string, cascade bool) (int64, error) {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+
+	q, args := `SELECT hash FROM tokens WHERE name=?`, []any{name}
+	if vault != "" {
+		q, args = q+` AND vault=?`, append(args, vault)
+	}
+	ids, err := column(tx, q, args...)
+	if err != nil {
+		return 0, err
+	}
+	if cascade {
+		for frontier := ids; len(frontier) > 0; {
+			var next []string
+			for _, id := range frontier {
+				children, err := column(tx, `SELECT hash FROM tokens WHERE issued_by=?`, id)
+				if err != nil {
+					return 0, err
+				}
+				next = append(next, children...)
+			}
+			ids = append(ids, next...)
+			frontier = next
+		}
+	}
+	var n int64
+	for _, id := range ids {
+		res, err := tx.Exec(`DELETE FROM tokens WHERE hash=?`, id)
+		if err != nil {
+			return 0, err
+		}
+		got, _ := res.RowsAffected()
+		n += got
+		if cascade {
+			if _, err := tx.Exec(`DELETE FROM join_codes WHERE issuer_id=? AND used_at=0`, id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return n, tx.Commit()
+}
+
+func column(tx *sql.Tx, q string, args ...any) ([]string, error) {
+	rows, err := tx.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // A join code stands in for a token on the way to a new device.
@@ -188,6 +308,7 @@ type Join struct {
 	Device    string
 	IssuedBy  string
 	ExpiresAt time.Time
+	issuerID  string
 }
 
 // ErrJoinInvalid covers missing, expired and already used codes alike: telling the
@@ -196,7 +317,7 @@ var ErrJoinInvalid = errors.New("join code is invalid, expired or already used")
 
 // CreateJoin mints a code for one device. Expired codes are swept on the way, so the
 // table never grows past what was issued recently.
-func (s *Store) CreateJoin(vault, device, issuedBy string, ttl time.Duration) (string, error) {
+func (s *Store) CreateJoin(vault, device string, issuer Token, ttl time.Duration) (string, error) {
 	if !ValidVault(vault) {
 		return "", fmt.Errorf("invalid vault name %q", vault)
 	}
@@ -207,8 +328,8 @@ func (s *Store) CreateJoin(vault, device, issuedBy string, ttl time.Duration) (s
 	code := base64.RawURLEncoding.EncodeToString(raw)
 	now := time.Now()
 	_, _ = s.db.Exec(`DELETE FROM join_codes WHERE expires_at < ? OR used_at > 0`, now.Add(-24*time.Hour).Unix())
-	_, err := s.db.Exec(`INSERT INTO join_codes(hash,vault,device,issued_by,created_at,expires_at)
-		VALUES(?,?,?,?,?,?)`, hashToken(code), vault, device, issuedBy, now.Unix(), now.Add(ttl).Unix())
+	_, err := s.db.Exec(`INSERT INTO join_codes(hash,vault,device,issued_by,created_at,expires_at,issuer_id)
+		VALUES(?,?,?,?,?,?,?)`, hashToken(code), vault, device, issuer.Name, now.Unix(), now.Add(ttl).Unix(), issuer.ID)
 	if err != nil {
 		return "", err
 	}
@@ -220,8 +341,8 @@ func (s *Store) CreateJoin(vault, device, issuedBy string, ttl time.Duration) (s
 func (s *Store) PeekJoin(code string) (Join, error) {
 	var j Join
 	var expires, used int64
-	err := s.db.QueryRow(`SELECT vault,device,issued_by,expires_at,used_at FROM join_codes WHERE hash=?`,
-		hashToken(code)).Scan(&j.Vault, &j.Device, &j.IssuedBy, &expires, &used)
+	err := s.db.QueryRow(`SELECT vault,device,issued_by,issuer_id,expires_at,used_at FROM join_codes WHERE hash=?`,
+		hashToken(code)).Scan(&j.Vault, &j.Device, &j.IssuedBy, &j.issuerID, &expires, &used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Join{}, ErrJoinInvalid
 	}
@@ -251,7 +372,7 @@ func (s *Store) RedeemJoin(code string) (string, Join, error) {
 	if n, _ := res.RowsAffected(); n != 1 {
 		return "", Join{}, ErrJoinInvalid
 	}
-	tok, err := s.Add(j.Device, j.Vault)
+	tok, err := s.Issue(j.Device, j.Vault, j.issuerID)
 	if err != nil {
 		return "", Join{}, err
 	}

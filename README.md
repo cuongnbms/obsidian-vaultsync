@@ -101,6 +101,7 @@ sync-server token list                                    # every vault, with a 
 sync-server token list   --vault work                     # just this one
 sync-server link         --vault work --url https://sync.example.com --name laptop
 sync-server token revoke --name laptop --vault work       # one vault; drop --vault for all
+sync-server token revoke --name laptop --cascade          # lost or stolen: also what it issued
 ```
 
 Same URL for all of them, and each vault has its own passphrase and key. In Docker,

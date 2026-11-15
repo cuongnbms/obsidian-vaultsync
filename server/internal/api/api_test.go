@@ -17,6 +17,7 @@ import (
 
 	"github.com/cuongnbms/obsidian-vaultsync/server/internal/api"
 	"github.com/cuongnbms/obsidian-vaultsync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/store"
 	"github.com/cuongnbms/obsidian-vaultsync/server/internal/vault"
 )
 
@@ -31,6 +32,18 @@ type harness struct {
 	srv *httptest.Server
 	// two devices means two tokens, as in real life
 	deskTok, phoneTok string
+	reg               *vault.Registry
+}
+
+// vault is the server-side store of the vault both tokens open, for tests that
+// set up state no client request can produce.
+func (h *harness) vault(t *testing.T) *store.Store {
+	t.Helper()
+	files, _, err := h.reg.Get("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
 }
 
 func newHarness(t *testing.T) *harness {
@@ -55,7 +68,7 @@ func newHarness(t *testing.T) *harness {
 	s := &api.Server{Auth: tokens, Vaults: reg, MaxUpload: 64 << 20}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &harness{t: t, srv: srv, deskTok: desk, phoneTok: phone}
+	return &harness{t: t, srv: srv, deskTok: desk, phoneTok: phone, reg: reg}
 }
 
 type putResult struct {

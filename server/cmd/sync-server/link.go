@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/auth"
 )
 
 // link makes a join link, for a screen that was lost or a device added from the
@@ -39,7 +41,7 @@ func link(args []string) error {
 		return err
 	}
 	defer st.Close()
-	code, err := st.CreateJoin(*vaultName, *name, "cli", time.Duration(*minutes)*time.Minute)
+	code, err := st.CreateJoin(*vaultName, *name, auth.Token{Name: "cli"}, time.Duration(*minutes)*time.Minute)
 	if err != nil {
 		return err
 	}

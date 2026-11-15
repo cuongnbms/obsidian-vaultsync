@@ -15,7 +15,7 @@ func TestJoinCodeIsSingleUseAndExpires(t *testing.T) {
 	}
 	defer st.Close()
 
-	code, err := st.CreateJoin("main", "phone", "desk", 15*time.Minute)
+	code, err := st.CreateJoin("main", "phone", Token{Name: "desk"}, 15*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestJoinCodeIsSingleUseAndExpires(t *testing.T) {
 		t.Fatalf("a spent code must not show a page, got %v", err)
 	}
 
-	stale, _ := st.CreateJoin("main", "tablet", "desk", -time.Second)
+	stale, _ := st.CreateJoin("main", "tablet", Token{Name: "desk"}, -time.Second)
 	if _, err := st.PeekJoin(stale); !errors.Is(err, ErrJoinInvalid) {
 		t.Fatalf("an expired code must be refused, got %v", err)
 	}
@@ -68,7 +68,7 @@ func TestListAndRevokeFilterByVault(t *testing.T) {
 	}
 
 	// Revoking one vault's device leaves the same name in the other vault.
-	if n, _ := st.Revoke("laptop", "second"); n != 1 {
+	if n, _ := st.Revoke("laptop", "second", false); n != 1 {
 		t.Fatalf("revoke laptop@second: want 1, got %d", n)
 	}
 	if only, _ := st.List("main"); len(only) != 2 {
@@ -76,7 +76,7 @@ func TestListAndRevokeFilterByVault(t *testing.T) {
 	}
 	// Revoking by name alone clears it from every vault.
 	st.Add("laptop", "second")
-	if n, _ := st.Revoke("laptop", ""); n != 2 {
+	if n, _ := st.Revoke("laptop", "", false); n != 2 {
 		t.Fatalf("revoke laptop everywhere: want 2, got %d", n)
 	}
 }
