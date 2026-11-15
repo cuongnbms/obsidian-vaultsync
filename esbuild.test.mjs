@@ -2,7 +2,13 @@
 import esbuild from "esbuild";
 
 await esbuild.build({
-	entryPoints: ["src/diff3.ts", "src/crypto.ts", "src/sync-engine.ts", "src/index-store.ts"],
+	entryPoints: [
+		"src/diff3.ts",
+		"src/crypto.ts",
+		"src/sync-engine.ts",
+		"src/index-store.ts",
+		"src/encryption-controller.ts",
+	],
 	bundle: true,
 	format: "esm",
 	target: "es2022",
