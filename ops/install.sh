@@ -115,6 +115,7 @@ case "$EXISTING" in
 		# else this machine serves keeps working.
 		cat > "/etc/caddy/conf.d/lockstep-$DOMAIN.caddy" <<CADDY
 $DOMAIN {
+	encode zstd gzip
 	reverse_proxy 127.0.0.1:$PORT {
 		transport http {
 			read_timeout 30m
@@ -186,6 +187,13 @@ server {
 	ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
 
 	client_max_body_size 512M;
+
+	# JSON only: the change log pages compress well, file content is served as
+	# application/octet-stream and stays as stored for Range downloads.
+	gzip            on;
+	gzip_proxied    any;
+	gzip_types      application/json;
+	gzip_min_length 512;
 
 	location / {
 		proxy_pass         http://127.0.0.1:$PORT;

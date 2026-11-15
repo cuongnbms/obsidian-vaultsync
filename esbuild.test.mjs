@@ -8,6 +8,7 @@ await esbuild.build({
 		"src/sync-engine.ts",
 		"src/index-store.ts",
 		"src/encryption-controller.ts",
+		"src/backoff.ts",
 	],
 	bundle: true,
 	format: "esm",

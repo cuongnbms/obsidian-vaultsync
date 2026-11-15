@@ -96,6 +96,8 @@ func (s *Store) Add(name, vault string) (string, error) {
 	return tok, nil
 }
 
+const lastSeenEvery = time.Hour
+
 // Resolve validates a token and returns the vault it is bound to.
 func (s *Store) Resolve(tok string) (Token, error) {
 	if tok == "" {
@@ -120,7 +122,12 @@ func (s *Store) Resolve(tok string) (Token, error) {
 	}
 	t.CreatedAt = time.Unix(created, 0)
 	t.LastSeen = time.Unix(seen, 0)
-	_, _ = s.db.Exec(`UPDATE tokens SET last_seen=? WHERE hash=?`, time.Now().Unix(), h)
+	// last_seen is read by a person in `token list`, to the hour at best. Writing
+	// it on every request put a synced commit in front of every call, on the one
+	// connection every vault shares, and serialised parallel downloads behind it.
+	if now := time.Now(); now.Sub(t.LastSeen) >= lastSeenEvery {
+		_, _ = s.db.Exec(`UPDATE tokens SET last_seen=? WHERE hash=?`, now.Unix(), h)
+	}
 	return t, nil
 }
 
