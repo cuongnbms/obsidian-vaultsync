@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Install the Lockstep Sync server on a Debian or Ubuntu machine.
+# Install the VaultSync server on a Debian or Ubuntu machine.
 #
 #   sudo ./install.sh sync.example.com
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 
 DOMAIN="${1:-}"
 VERSION="${LOCKSTEP_VERSION:-latest}"
-REPO="cuongnbms/obsidian-lockstep-sync"
+REPO="cuongnbms/obsidian-vaultsync"
 USER_NAME="lockstep"
 DATA_DIR="/var/lib/lockstep"
 BIN="/usr/local/bin/lockstep-sync-server"
@@ -56,7 +56,7 @@ say "writing the systemd unit"
 # is Caddy's job, which is also why nothing here needs to run as root.
 cat > /etc/systemd/system/lockstep-sync.service <<UNIT
 [Unit]
-Description=Lockstep Sync server
+Description=VaultSync server
 After=network-online.target
 Wants=network-online.target
 

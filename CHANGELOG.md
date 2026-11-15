@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
+
+The plugin is now VaultSync, with the id `vaultsync`, from the repository
+cuongnbms/obsidian-vaultsync. It is not in the community catalogue: BRAT installs it
+from the GitHub releases, and the join page a new device opens walks through
+installing BRAT and then the plugin. The setup link is `obsidian://vaultsync-setup`;
+links made by an older version no longer open the plugin. The server image is
+ghcr.io/cuongnbms/obsidian-vaultsync.
 
 A device can be made read-only, for a phone that is only for reading: Settings →
 Read-only device. It takes every change from the server and sends nothing back,

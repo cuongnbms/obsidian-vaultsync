@@ -1,4 +1,4 @@
-# obsidian-lockstep-sync: Obsidian plugin (TypeScript, pnpm) at the root, sync server
+# obsidian-vaultsync: Obsidian plugin (TypeScript, pnpm) at the root, sync server
 # (Go) in server/. `mise tasks` lists the tasks, `mise run <task>` runs one.
 
 [settings]

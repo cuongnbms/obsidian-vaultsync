@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/blob"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/store"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/blob"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/store"
 )
 
 // Collecting garbage is the only operation here that cannot be undone. Every test

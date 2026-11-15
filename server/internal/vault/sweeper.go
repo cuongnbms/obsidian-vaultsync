@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/store"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/store"
 )
 
 // Sweeper erases deletions that have outlived their retention.

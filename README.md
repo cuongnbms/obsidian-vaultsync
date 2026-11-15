@@ -1,4 +1,4 @@
-# Lockstep Sync
+# VaultSync
 
 Two-way sync for your vault between desktop, iPhone, iPad and Android, through a server
 you own. Self-hosted, end-to-end encrypted, free and open source. No subscription, no
@@ -36,7 +36,7 @@ Git for this, the difference is below.
 
 Every self-hosted sync asks for something first. LiveSync wants a CouchDB. Synch and
 Osync want Docker or a Cloudflare account. Remotely Save wants the cloud storage you
-were trying to leave. Lockstep wants one file on one machine you already have.
+were trying to leave. VaultSync wants one file on one machine you already have.
 
 And it shows its work. A suite of data-loss scenarios runs on every commit, driving
 the real plugin against a real server: simultaneous edits, deletions racing edits,
@@ -72,7 +72,7 @@ background, and every fifteen seconds while it is open.
 A machine reachable from the internet, and a domain name pointed at it:
 
 ```bash
-curl -fsSLO https://github.com/cuongnbms/obsidian-lockstep-sync/releases/latest/download/install.sh
+curl -fsSLO https://github.com/cuongnbms/obsidian-vaultsync/releases/latest/download/install.sh
 less install.sh    # read what you are about to run as root; q to close
 sudo bash install.sh sync.example.com
 ```
@@ -108,14 +108,20 @@ run these against the container and let it use its default `/data` (the path you
 mount provides), rather than passing `--data`:
 
 ```bash
-docker run --rm -v /your/data:/data ghcr.io/cuongnbms/obsidian-lockstep-sync:latest \
+docker run --rm -v /your/data:/data ghcr.io/cuongnbms/obsidian-vaultsync:latest \
   token add --vault work --name laptop
 ```
 
 ## Install the plugin
 
-Settings → Community plugins → Browse → **Lockstep Sync** → Install → Enable. Or from the
-web: [community.obsidian.md/plugins/lockstep-sync](https://community.obsidian.md/plugins/lockstep-sync).
+VaultSync is not in the community catalogue. Install it with
+[BRAT](https://github.com/TfTHacker/obsidian42-brat), which also keeps it up to date:
+
+1. Settings → Community plugins → Browse → **BRAT** → Install → Enable.
+2. BRAT → **Add beta plugin** → `cuongnbms/obsidian-vaultsync` → **Add plugin**, then
+   enable **VaultSync** under Community plugins.
+
+The join page a new device opens has a button for each of these steps.
 
 First device: open the link the installer printed. Every next device: **Link a new
 device** in the settings shows a QR code; the page it opens walks through the steps.
