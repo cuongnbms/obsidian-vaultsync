@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -53,6 +54,20 @@ var ErrNotFound = errors.New("not found")
 
 type Store struct {
 	db *sql.DB
+	// now is the server's clock, replaceable in tests that need a deletion dated
+	// in the past.
+	now func() time.Time
+}
+
+// SetClock replaces the clock that dates deletions. nil restores the real one. It
+// exists for tests.
+func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
+func (s *Store) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 const schema = `
@@ -99,7 +114,35 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := redateTombstones(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// redateTombstones runs once per vault. Servers before 1.1.3 dated a tombstone by
+// the file's last edit, so what they left behind cannot say when it was deleted.
+// Each gets a full retention window from the upgrade: keeping a deletion a little
+// longer than asked is recoverable, erasing it early is not.
+func redateTombstones(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO meta(key,value) VALUES('tombstones_dated','1')
+		ON CONFLICT(key) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil // done before
+	}
+	if _, err := tx.Exec(`UPDATE files SET mtime=? WHERE deleted=1`, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -233,9 +276,12 @@ func (s *Store) Delete(path string, baseRev int64, updatedBy string) (File, erro
 		if !exists {
 			return File{}, false, ErrNotFound
 		}
+		// A tombstone is dated by the server at the moment of deletion. The retention
+		// window counts from this, and carrying the last edit over instead erased a
+		// note untouched for longer than the window on the first sweep after it went.
 		next := File{
 			Path: path, Rev: cur.Rev + 1, Seq: seq, Hash: "", Size: 0,
-			Mtime: cur.Mtime, Deleted: true, Folder: cur.Folder, UpdatedBy: updatedBy,
+			Mtime: s.clock().UnixMilli(), Deleted: true, Folder: cur.Folder, UpdatedBy: updatedBy,
 		}
 		return next, true, nil
 	})
@@ -390,7 +436,7 @@ func (s *Store) Rename(from, to string, baseRev int64, updatedBy string) (File, 
 	}
 	tomb := File{
 		Path: from, Rev: src.Rev + 1, Seq: seqSrc, Hash: "", Size: 0,
-		Mtime: src.Mtime, Deleted: true, Folder: src.Folder, UpdatedBy: updatedBy,
+		Mtime: s.clock().UnixMilli(), Deleted: true, Folder: src.Folder, UpdatedBy: updatedBy,
 	}
 	if err := upsert(tx, tomb); err != nil {
 		return File{}, err
@@ -470,7 +516,7 @@ type Deleted struct {
 	Path string `json:"path"`
 	// The tombstone's revision, which is what a client must base a restore on.
 	Rev int64 `json:"rev"`
-	// When it was deleted, as the deleting device saw the clock.
+	// When it was deleted, by the server's clock.
 	DeletedAt int64 `json:"deleted_at"`
 	// The last revision that still has content, and what that content is.
 	ContentRev int64  `json:"content_rev"`

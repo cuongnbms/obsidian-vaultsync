@@ -166,6 +166,14 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// internal reports a server-side failure. The detail goes to the log; the client
+// gets a fixed message, since an error from the filesystem or SQLite names paths
+// and queries that are nobody's business on the other end.
+func (s *Server) internal(w http.ResponseWriter, what string, err error) {
+	s.logger().Error(what, "err", err)
+	writeErr(w, http.StatusInternalServerError, "internal", "the server failed to "+what)
+}
+
 func writeErr(w http.ResponseWriter, code int, kind, msg string) {
 	writeJSON(w, code, map[string]string{"error": kind, "message": msg})
 }
@@ -395,23 +403,35 @@ func (s *Server) putFile(w http.ResponseWriter, r *http.Request, c ctx) {
 	// hash, so a stray blob left by a conflict is harmless and gets collected later.
 	var hash string
 	var size int64
+	release := func() {}
 	if folder {
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 	} else {
-		hash, size, err = c.blobs.Put(r.Body, s.MaxUpload)
+		staged, err := c.blobs.Stage(r.Body, s.MaxUpload)
 		if err != nil {
 			writeErr(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
 			return
 		}
+		defer staged.Discard()
+		// From storing the content to committing the row, no sweep may run: it
+		// would see the content as unreferenced and erase it under the new row.
+		release = c.blobs.Hold()
+		if err := staged.Commit(); err != nil {
+			release()
+			s.internal(w, "store blob", err)
+			return
+		}
+		hash, size = staged.Hash, staged.Size
 	}
 
 	f, err := c.files.Put(store.PutArgs{
 		Path: p, BaseRev: baseRev, Hash: hash, Size: size, Mtime: mtime,
 		Folder: folder, UpdatedBy: device(r, c.tok.Name),
 	})
+	release()
 	var conflict *store.ConflictError
 	if errors.As(err, &conflict) {
 		writeConflict(w, conflict)
@@ -603,12 +623,10 @@ func (s *Server) purgeDeleted(w http.ResponseWriter, r *http.Request, c ctx) {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	live, err := c.files.LiveHashes()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	swept, err := c.blobs.Sweep(live, false)
+	// No grace period: the readable copies have to go now, not in an hour. The
+	// sweep holds uploads off instead, so none can land between the list of what
+	// is still needed and the erase.
+	swept, err := c.blobs.Sweep(c.files.LiveHashes, 0, false)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
