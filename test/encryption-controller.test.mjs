@@ -174,6 +174,28 @@ test("two calls at once make one attempt", async () => {
 	assert.equal(server.asked, 1);
 });
 
+test("Set pressed while leaving the field is still asking the server creates the key", async () => {
+	// A mouse press on the button blurs the field first: the blur's attempt, which
+	// may not create a key, is in flight when the button's attempt arrives.
+	const { controller, server, said } = setup({ passphrase: "chosen" });
+	const blur = controller.applyEncryption();
+	const press = controller.applyEncryption(false, true);
+	await Promise.allSettled([blur, press]);
+
+	assert.equal(server.created.length, 1, "the press must create the key, not take the blur's answer");
+	assert.equal(controller.cipher.enabled, true);
+	assert.equal(controller.isLocked(), false);
+	assert.equal(said.syncs, 1);
+});
+
+test("Set pressed during an attempt that found the key opens it once, and creates nothing", async () => {
+	const { controller, server } = setup({ passphrase: "right", key: await keyRecord("right") });
+	await Promise.all([controller.applyEncryption(true), controller.applyEncryption(false, true)]);
+
+	assert.equal(server.created.length, 0, "a vault that has a key never gets a second one");
+	assert.equal(controller.cipher.enabled, true);
+});
+
 test("the guard refuses a pass when it has never heard whether the vault has a key", async () => {
 	const { controller, server } = setup();
 	server.fail = new Error("could not connect");

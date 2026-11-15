@@ -79,6 +79,8 @@ export class EncryptionController {
 	private migration: Migration | null = null;
 	/** In flight, so two callers do not both do it and both report it. */
 	private unlocking: Promise<void> | null = null;
+	/** Whether the attempt in flight may create the key, as only Set may. */
+	private unlockingMayCreate = false;
 	/** The passphrase whose outcome is already known and already announced. */
 	private settledPassphrase: string | null = null;
 
@@ -206,7 +208,16 @@ export class EncryptionController {
 	 * than being asked, say nothing at all.
 	 */
 	async applyEncryption(quiet = false, allowCreate = false): Promise<void> {
-		if (this.unlocking) return this.unlocking;
+		if (this.unlocking) {
+			if (!allowCreate || this.unlockingMayCreate) return this.unlocking;
+			// Set pressed while an attempt that may not create the key is in flight:
+			// on a desktop the press blurs the field first, so this is the ordinary
+			// case, not a race. Taking that attempt's answer swallowed the press. Let
+			// it finish, then do what was pressed, unless it already opened the vault.
+			await this.unlocking.catch(() => {});
+			if (this._cipher.enabled && this.settledPassphrase === this.settings.passphrase) return;
+			return this.applyEncryption(quiet, true);
+		}
 		if (
 			!allowCreate &&
 			this.settledPassphrase === this.settings.passphrase &&
@@ -214,6 +225,7 @@ export class EncryptionController {
 		) {
 			return;
 		}
+		this.unlockingMayCreate = allowCreate;
 		this.unlocking = this.attemptEncryption(quiet, allowCreate).finally(() => {
 			this.unlocking = null;
 		});

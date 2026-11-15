@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1
+
+Set passphrase works when pressed with the mouse. The press takes the focus out of
+the passphrase field first, and leaving the field already asks the server, without
+permission to create the key; the press then got that answer, "Passphrase typed but
+not set yet", and no key was made, however often it was pressed. It now waits for
+that question to finish and creates the key. The strength meter under the field no
+longer appears once more every time the field is left.
+
 ## 1.1.0
 
 The plugin is now VaultSync, with the id `vaultsync`, from the repository
