@@ -26,10 +26,14 @@ export class IdleBackoff {
 		return this.current;
 	}
 
-	/** A pass finished: keep checking often if it moved anything, back off if not. */
-	finished(moved: boolean, now: number): void {
+	/**
+	 * A pass finished: keep checking often if it moved anything, back off if not.
+	 * A pass someone asked for (the button, the command) means they are here, so it
+	 * counts as activity even when it moved nothing.
+	 */
+	finished(moved: boolean, now: number, asked = false): void {
 		this.lastPass = now;
-		this.current = moved ? this.base : Math.min(this.current * 2, this.max);
+		this.current = moved || asked ? this.base : Math.min(this.current * 2, this.max);
 	}
 
 	/** Something happened here, an edit: check again soon. */

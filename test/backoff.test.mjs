@@ -53,3 +53,14 @@ test("while checks are at the base pace, focus triggers nothing extra", () => {
 	const b = new IdleBackoff(BASE, MAX);
 	assert.equal(b.wake(1_000_000), false);
 });
+
+test("a pass someone asked for counts as activity, even if it moved nothing", () => {
+	const b = new IdleBackoff(BASE, MAX);
+	b.finished(false, 0);
+	b.finished(false, 0);
+	b.finished(false, 0, true);
+	assert.equal(b.delay, BASE);
+	// An automatic pass after it backs off from the base again, not from where it was.
+	b.finished(false, 0);
+	assert.equal(b.delay, BASE * 2);
+});

@@ -21,8 +21,8 @@ const DEBOUNCE_MS = 2500;
 /**
  * How often to ask the server for changes while things are happening. Each pass
  * that moves nothing doubles the wait, up to IDLE_INTERVAL_MAX_MS; an edit here,
- * a change that comes down, or bringing the app back to the front returns it to
- * this. Edits made here never wait for it: they are sent after DEBOUNCE_MS.
+ * a change that comes down, a "Sync now", or bringing the app back to the front
+ * returns it to this. Edits made here never wait for it: they are sent after DEBOUNCE_MS.
  */
 const SYNC_INTERVAL_MS = 15_000;
 const IDLE_INTERVAL_MAX_MS = 5 * 60_000;
@@ -181,6 +181,9 @@ export default class LockstepPlugin extends Plugin {
 		this.setStatus(t("status.index", { files: this.index.size, seq: this.index.lastSeq }));
 
 		this.addCommand({ id: "sync-now", name: t("cmd.sync"), callback: () => void this.syncNow() });
+		// The same "Sync now", one tap away. The ribbon, unlike the status bar, is
+		// there on mobile too, and the status bar's click already opens the conflicts.
+		this.addRibbonIcon("refresh-cw", t("cmd.sync"), () => void this.syncNow());
 		this.addCommand({ id: "pull-all", name: t("cmd.pull"), callback: () => void this.pullAll() });
 		this.addCommand({
 			id: "encrypt-in-place",
@@ -830,7 +833,7 @@ export default class LockstepPlugin extends Plugin {
 			const report = await this.engine.sync(!quiet);
 			const secs = ((Date.now() - started) / 1000).toFixed(1);
 			this.report(report, secs, quiet);
-			this.backoff.finished(moved(report), Date.now());
+			this.backoff.finished(moved(report), Date.now(), !quiet);
 			if (report.uploaded + report.downloaded > 0 && report.errors.length === 0) {
 				this.lastSummary = t(this.encryption.cipher.enabled ? "progress.doneEncrypted" : "progress.done");
 				for (const el of this.progressTargets) el.setText(this.lastSummary);

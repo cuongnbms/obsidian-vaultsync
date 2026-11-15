@@ -14,7 +14,9 @@ that device for good.
 
 An idle device asks the server less often: the wait doubles after every check that finds
 nothing, up to five minutes, and returns to fifteen seconds on an edit, an incoming change,
-or the app coming back to the front. Edits made here are still sent within seconds. A check
+or the app coming back to the front. Edits made here are still sent within seconds. A new
+ribbon button starts a sync, the same as the "Sync now" command, and either one also brings
+the wait back to fifteen seconds. A check
 that changes nothing no longer rewrites the local index. On the server, downloads no longer
 wait for each other, and the change log is compressed by the proxy the installer sets up.
 
