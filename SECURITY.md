@@ -6,7 +6,7 @@ and a server. Reports are welcome and taken seriously.
 ## Reporting a vulnerability
 
 Open a private security advisory through GitHub:
-https://github.com/stephansergeev/obsidian-lockstep-sync/security/advisories/new
+https://github.com/cuongnbms/obsidian-lockstep-sync/security/advisories/new
 
 Please do not open a public issue for anything that could be used against somebody's vault
 before there is a fix. You will get an answer within a few days.

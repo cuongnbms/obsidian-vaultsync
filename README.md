@@ -72,7 +72,7 @@ background, and every fifteen seconds while it is open.
 A machine reachable from the internet, and a domain name pointed at it:
 
 ```bash
-curl -fsSLO https://github.com/stephansergeev/obsidian-lockstep-sync/releases/latest/download/install.sh
+curl -fsSLO https://github.com/cuongnbms/obsidian-lockstep-sync/releases/latest/download/install.sh
 less install.sh    # read what you are about to run as root; q to close
 sudo bash install.sh sync.example.com
 ```
@@ -89,11 +89,6 @@ plugin at the private address and skip TLS entirely.
 There is a [`docker-compose.yml`](docker-compose.yml) for machines that only run
 containers. Read the volume line before starting it: it is a bind mount on purpose,
 because a named volume is what `docker compose down -v` destroys.
-
-A member of the community wrote an excellent guide for running the container and
-issuing a device token on a Ugreen NAS (UGOS), where you cannot open a terminal
-inside the container:
-[How to set up the Docker container and generate a device token](https://github.com/stephansergeev/obsidian-lockstep-sync/discussions/5).
 
 ## Multiple vaults
 
@@ -113,7 +108,7 @@ run these against the container and let it use its default `/data` (the path you
 mount provides), rather than passing `--data`:
 
 ```bash
-docker run --rm -v /your/data:/data ghcr.io/stephansergeev/obsidian-lockstep-sync:latest \
+docker run --rm -v /your/data:/data ghcr.io/cuongnbms/obsidian-lockstep-sync:latest \
   token add --vault work --name laptop
 ```
 
@@ -152,8 +147,8 @@ The protocol and its reasoning: [`spec/`](spec/).
 
 ## License
 
-MIT, the whole repository. Written by [Stephan Sergeev](https://github.com/stephansergeev).
+MIT, the whole repository. See [LICENSE](LICENSE).
 
 ## Author
 
-Built by Stephan Sergeev. More at [stephansergeev.com](https://stephansergeev.com).
+Maintained by [Cuong Nguyen](https://github.com/cuongnbms).

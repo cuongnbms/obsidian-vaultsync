@@ -15,9 +15,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/api"
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/auth"
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/vault"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/api"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/vault"
 )
 
 // Every scenario below checks exactly one invariant:

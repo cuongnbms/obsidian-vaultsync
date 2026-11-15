@@ -13,8 +13,8 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/store"
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/vault"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/store"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/vault"
 )
 
 // importVault uploads an existing vault from disk into a vault on the server.

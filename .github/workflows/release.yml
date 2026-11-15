@@ -55,7 +55,7 @@ jobs:
         run: sha256sum * > SHA256SUMS
 
       # GitHub signs a statement that these exact bytes came out of this workflow
-      # on this commit. Anyone can check it: gh attestation verify main.js --owner stephansergeev
+      # on this commit. Anyone can check it: gh attestation verify main.js --owner cuongnbms
       - name: attest provenance
         uses: actions/attest-build-provenance@v2
         with:

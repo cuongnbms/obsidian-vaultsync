@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/auth"
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/blob"
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/store"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/blob"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/store"
 )
 
 type entry struct {

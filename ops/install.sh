@@ -15,7 +15,7 @@ set -euo pipefail
 
 DOMAIN="${1:-}"
 VERSION="${LOCKSTEP_VERSION:-latest}"
-REPO="stephansergeev/obsidian-lockstep-sync"
+REPO="cuongnbms/obsidian-lockstep-sync"
 USER_NAME="lockstep"
 DATA_DIR="/var/lib/lockstep"
 BIN="/usr/local/bin/lockstep-sync-server"
