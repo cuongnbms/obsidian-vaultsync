@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-import { Notice, Plugin, TAbstractFile, TFile, normalizePath, Platform } from "obsidian";
+import { MarkdownView, Notice, Plugin, TAbstractFile, TFile, normalizePath, Platform } from "obsidian";
 import { ApiError, SyncClient, redeemJoin } from "./api";
 import { ConflictModal } from "./conflict-modal";
 import { showConflictNotice } from "./conflict-notice";
 import { RestoreModal } from "./restore-modal";
+import { ReadOnlyOffModal, ReadOnlyOnModal } from "./read-only-modal";
 import { AddDeviceModal } from "./onboarding";
 import { VaultCipher, WrongPassphrase, plaintext, type Cipher, type PathCipher, type Migration, type VaultKeyRecord } from "./crypto";
 import { t } from "./i18n";
@@ -223,6 +224,9 @@ export default class LockstepPlugin extends Plugin {
 			// If this fails because the network is not up yet, the next pass retries.
 			void this.applyEncryption(true).catch(() => {});
 			this.registerVaultEvents();
+			this.registerEvent(this.app.workspace.on("layout-change", () => this.enforceReadingView()));
+			this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.enforceReadingView()));
+			this.enforceReadingView();
 			this.restartAutoSync();
 			void this.syncNow(true);
 		});
@@ -503,7 +507,13 @@ export default class LockstepPlugin extends Plugin {
 					// Asked before the key is set, because a key cannot be taken back: a
 					// device that excludes files other devices keep cannot encrypt them,
 					// and erasing their readable copies would lose them.
-					const plain = new SyncClient(this.settings.serverUrl, this.settings.token, this.settings.deviceName, null);
+					const plain = new SyncClient(
+			this.settings.serverUrl,
+			this.settings.token,
+			this.settings.deviceName,
+			null,
+			this.settings.readOnly,
+		);
 					const excluded = await this.engine.excludedOnServer(plain);
 					if (excluded.length > 0) {
 						this.cipher = plaintext;
@@ -563,6 +573,7 @@ export default class LockstepPlugin extends Plugin {
 	}
 
 	async setRetention(days: number): Promise<void> {
+		if (this.settings.readOnly) throw new Error(t("readOnly.refused"));
 		const client = this.client();
 		if (!client) throw new Error("not configured");
 		await client.setRetention(days);
@@ -576,6 +587,7 @@ export default class LockstepPlugin extends Plugin {
 
 	/** Apply a decision about a conflict and refresh what the status bar shows. */
 	async resolveConflict(path: string, choice: "mine" | "server" | "merged"): Promise<void> {
+		if (this.refusedReadOnly()) return;
 		try {
 			await this.engine.resolveConflict(path, choice);
 			this.setStatus(this.lastStatus);
@@ -707,7 +719,91 @@ export default class LockstepPlugin extends Plugin {
 		).open();
 	}
 
+	// --- read-only ------------------------------------------------------------
+
+	/** True, with a notice saying why, when this device is read-only. */
+	private refusedReadOnly(): boolean {
+		if (!this.settings.readOnly) return false;
+		new Notice(t("readOnly.refused"), 6000);
+		return true;
+	}
+
+	/**
+	 * Turn read-only on or off, asking first where something would otherwise be
+	 * undone or sent without the person knowing. Resolves once it is settled either
+	 * way, so the settings screen can show the outcome.
+	 */
+	setReadOnly(on: boolean): Promise<void> {
+		if (on === this.settings.readOnly) return Promise.resolve();
+		if (on && this.index.conflicts.length > 0) {
+			// Deciding a conflict is a write, which a read-only device cannot make.
+			new Notice(t("readOnly.on.conflicts", { count: this.index.conflicts.length }), 8000);
+			return Promise.resolve();
+		}
+		if (on && this.migration?.mine) {
+			// The server takes writes from nobody else until this device finishes.
+			new Notice(t("readOnly.on.migrating"), 8000);
+			return Promise.resolve();
+		}
+		return new Promise((done) => {
+			if (on) {
+				const pending = this.engine.pendingChanges();
+				if (pending === 0) {
+					void this.applyReadOnly(true).finally(done);
+					return;
+				}
+				new ReadOnlyOnModal(
+					this.app,
+					pending,
+					async (choice) => {
+						if (choice === "sync") {
+							await this.syncNow(true);
+							if (this.engine.pendingChanges() > 0) {
+								new Notice(t("readOnly.on.stillPending"), 8000);
+								return;
+							}
+						}
+						await this.applyReadOnly(true);
+					},
+					done,
+				).open();
+				return;
+			}
+			const files = this.engine.filesOnlyHere();
+			if (files.length === 0) {
+				void this.applyReadOnly(false).finally(done);
+				return;
+			}
+			new ReadOnlyOffModal(this.app, files, (keep) => this.applyReadOnly(false, keep), done).open();
+		});
+	}
+
+	private async applyReadOnly(on: boolean, keepHere: string[] = []): Promise<void> {
+		await this.engine.switchReadOnly(on, keepHere);
+		this.settings.readOnly = on;
+		await this.saveSettings();
+		this.enforceReadingView();
+		this.setStatus(this.lastStatus);
+		new Notice(t(on ? "readOnly.turnedOn" : "readOnly.turnedOff"));
+		this.scheduleSync();
+	}
+
+	/**
+	 * On a read-only device every open note shows in reading view. Obsidian has no
+	 * read-only editor for plugins, so a note switched to editing is switched back;
+	 * whatever is changed some other way is put back by the next sync.
+	 */
+	private enforceReadingView(): void {
+		if (!this.settings.readOnly) return;
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			if (!(leaf.view instanceof MarkdownView) || leaf.view.getMode() !== "source") return;
+			const state = leaf.getViewState();
+			void leaf.setViewState({ ...state, state: { ...state.state, mode: "preview" } });
+		});
+	}
+
 	openRestore(): void {
+		if (this.refusedReadOnly()) return;
 		new RestoreModal(
 			this.app,
 			() => this.engine.deletedFiles(),
@@ -722,6 +818,7 @@ export default class LockstepPlugin extends Plugin {
 	}
 
 	openConflicts(): void {
+		if (this.refusedReadOnly()) return;
 		void this.engine.pruneConflicts();
 		new ConflictModal(
 			this.app,
@@ -739,6 +836,7 @@ export default class LockstepPlugin extends Plugin {
 		if (this.encryptionWanted() || this.locked) {
 			parts.push(this.locked ? t("status.lockedShort") : t("status.encrypted"));
 		}
+		if (this.settings.readOnly) parts.push(t("status.readOnly"));
 		if (pending > 0) parts.push(t("conflict.pending", { count: pending }));
 		this.statusBar?.setText(parts.join(" · "));
 	}
@@ -763,6 +861,7 @@ export default class LockstepPlugin extends Plugin {
 			this.settings.token,
 			this.settings.deviceName,
 			this.pathCipher,
+			this.settings.readOnly,
 		);
 	}
 
@@ -906,6 +1005,7 @@ export default class LockstepPlugin extends Plugin {
 	 * an existing one and continues an interrupted run.
 	 */
 	private async encryptFromCommand(): Promise<void> {
+		if (this.refusedReadOnly()) return;
 		if (!this.settings.passphrase) {
 			new Notice(`Lockstep: ${t("encryption.pressSet")}`, 8000);
 			return;
@@ -926,6 +1026,8 @@ export default class LockstepPlugin extends Plugin {
 	 */
 	async encryptInPlace(quiet = false): Promise<void> {
 		if (!this.cipher.enabled || !this.pathCipher) return;
+		// Re-uploading the vault is a write; a read-only device leaves it to another.
+		if (this.settings.readOnly) return;
 		const sealed = this.client(!quiet);
 		if (!sealed) return;
 		if (this.engine.busy) {
@@ -984,8 +1086,8 @@ export default class LockstepPlugin extends Plugin {
 
 	private report(report: SyncReport, secs: string, quiet: boolean): void {
 		const touched =
-			report.downloaded + report.uploaded + report.merged + report.conflicts + report.deleted;
-		const line =
+			report.downloaded + report.uploaded + report.merged + report.conflicts + report.deleted + report.kept;
+		let line =
 			touched === 0
 				? t("status.upToDate", { seq: this.index.lastSeq })
 				: t("status.syncSummary", {
@@ -995,6 +1097,8 @@ export default class LockstepPlugin extends Plugin {
 						merged: report.merged,
 						conflicts: report.conflicts,
 					});
+		// Said every time, quiet or not: something typed here was replaced.
+		if (report.kept > 0) line += ` · ${t("readOnly.kept", { count: report.kept })}`;
 		// A pass the barrier stopped did nothing, and "up to date" would say otherwise.
 		const barrier = this.cipherStatus !== "" && report.errors.includes(this.cipherStatus);
 		this.setStatus(barrier ? this.cipherStatus : line);
@@ -1004,7 +1108,7 @@ export default class LockstepPlugin extends Plugin {
 			if (!quiet && this.cipherStatus === t("status.keyUnknown")) {
 				new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
 			}
-		} else if (!quiet || report.conflicts > 0) {
+		} else if (!quiet || report.conflicts > 0 || report.kept > 0) {
 			new Notice(t("notice.syncDone", { summary: line }));
 		}
 		// The barrier is a state, already on the status bar and already announced

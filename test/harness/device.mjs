@@ -118,6 +118,7 @@ export async function makeDevice(server, name, token, options = {}) {
 		intervalSeconds: 60,
 		encryption: false,
 		passphrase: "",
+		readOnly: options.readOnly ?? false,
 	};
 
 	const conflicts = [];
@@ -131,7 +132,7 @@ export async function makeDevice(server, name, token, options = {}) {
 		index,
 		settings,
 		client: () => {
-			const c = new SyncClient(server.url, token, settings.deviceName, pathCipher);
+			const c = new SyncClient(server.url, token, settings.deviceName, pathCipher, settings.readOnly);
 			return options.wrapClient ? options.wrapClient(c) : c;
 		},
 		scratchDir: ".index",

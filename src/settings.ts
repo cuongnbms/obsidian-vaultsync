@@ -34,6 +34,11 @@ export interface SyncSettings {
 	passphrase: string;
 	/** Kept for old settings files; the interval itself is fixed in code now. */
 	intervalSeconds: number;
+	/**
+	 * This device only reads: it takes what the server has, sends nothing back,
+	 * and opens notes in reading view. Kept per device, like every setting here.
+	 */
+	readOnly: boolean;
 }
 
 /**
@@ -54,6 +59,7 @@ export const DEFAULT_SETTINGS: SyncSettings = {
 	encryption: false,
 	passphrase: "",
 	intervalSeconds: 15,
+	readOnly: false,
 };
 
 /**
@@ -445,6 +451,20 @@ export class SyncSettingsTab extends PluginSettingTab {
 				name: t("settings.device.name"),
 				desc: t("settings.device.desc"),
 				control: { type: "text", key: "deviceName", placeholder: defaultDeviceName() },
+			},
+			{
+				name: t("settings.readOnly.name"),
+				desc: t("settings.readOnly.desc"),
+				// Not a plain control: turning it either way may ask a question first, and
+				// the toggle shows what was decided, not what was clicked.
+				render: (setting) => {
+					setting.addToggle((toggle) =>
+						toggle.setValue(this.plugin.settings.readOnly).onChange((on) => {
+							if (on === this.plugin.settings.readOnly) return;
+							void this.plugin.setReadOnly(on).then(() => this.update());
+						}),
+					);
+				},
 			},
 			{
 				name: t("settings.excludes.name"),

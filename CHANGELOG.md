@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+A device can be made read-only, for a phone that is only for reading: Settings →
+Read-only device. It takes every change from the server and sends nothing back,
+and notes open in reading view. Whatever changes on it anyway, from another app or
+a plugin, is put back to the server's version on the next sync, with the device's
+own version kept aside as a copy that stays there; a rename is moved back, and a
+deleted file comes back. Files made on it stay there. Turning the mode on while
+changes are still waiting offers to send them first; turning it off lists the files
+made meanwhile, and each one goes up or stays on the device. The client itself
+refuses every write while the mode is on, so nothing reaches the server whatever
+asks for it. Only the plugin changed.
+
 A note edited or deleted while Obsidian or the plugin was closed, by another app or
 another sync tool, never synced: only the file watcher marked changes, and it only
 runs while the plugin does. The first sync after each start now compares every

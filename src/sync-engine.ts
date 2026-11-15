@@ -3,7 +3,7 @@
 import type { App } from "obsidian";
 import { ApiError, ConflictError, SyncClient, type ChangeEntry } from "./api";
 
-export { SyncClient } from "./api";
+export { SyncClient, ReadOnlyError } from "./api";
 import { merge3 } from "./diff3";
 import type { DeferredChange, LocalIndex, PendingRename } from "./index-store";
 import { conflictName, defaultDeviceName, sha256, toNFC } from "./paths";
@@ -37,6 +37,8 @@ export interface SyncReport {
 	renamed: number;
 	merged: number;
 	conflicts: number;
+	/** Read-only: changes made here, replaced by the server's version and kept aside. */
+	kept: number;
 	skipped: number;
 	errors: string[];
 }
@@ -49,6 +51,7 @@ function emptyReport(): SyncReport {
 		renamed: 0,
 		merged: 0,
 		conflicts: 0,
+		kept: 0,
 		skipped: 0,
 		errors: [],
 	};
@@ -234,6 +237,11 @@ export class SyncEngine {
 
 	get busy(): boolean {
 		return this.claims > 0;
+	}
+
+	/** A device that only reads: it takes the server's vault and sends nothing back. */
+	private get readOnly(): boolean {
+		return this.deps.settings.readOnly === true;
 	}
 
 	/** Run fn once everything before it has finished. Claimed synchronously, on the call. */
@@ -446,6 +454,15 @@ export class SyncEngine {
 			// A pass started by hand after the warning was given is the answer to it.
 			const confirmed = manual && this.heldDeletions;
 			if (!this.scanned || confirmed) await this.scanDisk(report, confirmed);
+			if (this.readOnly) {
+				// Nothing goes up. What changed here is put back the way the server has
+				// it, with this device's version kept aside on this device.
+				await this.undoRenames(report);
+				this.phase = "pull";
+				await this.pull(client, report);
+				await this.revertLocal(client, report);
+				return report;
+			}
 			// Renames go to the server before anything is read from it. A pass used to
 			// start by pulling, and at that moment the server still believed the old
 			// paths: they were missing locally, unknown to the index, and so were
@@ -785,11 +802,194 @@ export class SyncEngine {
 			await this.download(client, entry, path);
 			return "downloaded";
 		}
-		const backup = await this.freeName(conflictName(path, this.deviceName(), new Date()));
-		await this.writeLocalOnly(backup, local);
+		const backup = await this.keepAside(path, local);
 		await this.download(client, entry, path);
 		this.trace(`download everything kept ${path} aside as ${backup}`);
 		return "kept";
+	}
+
+	/** Save this device's version of path as a copy that stays on this device. */
+	private async keepAside(path: string, local: ArrayBuffer): Promise<string> {
+		const backup = await this.freeName(conflictName(path, this.deviceName(), new Date()));
+		await this.writeLocalOnly(backup, local);
+		return backup;
+	}
+
+	// --- read-only ------------------------------------------------------------
+
+	/**
+	 * Read-only: write the server's revision over path, keeping this device's
+	 * version (when there is one) aside. Fetched before anything is written, so a
+	 * download that fails leaves no copy behind for the retry to make again.
+	 */
+	private async replaceKeepingCopy(
+		client: SyncClient,
+		path: string,
+		local: ArrayBuffer | null,
+		rev?: number,
+		hash?: string,
+		size?: number,
+		mtime = Date.now(),
+	): Promise<void> {
+		const got = await this.fetch(client, path, rev, hash, size);
+		if (local) {
+			const backup = await this.keepAside(path, local);
+			this.trace(`read-only kept ${path} aside as ${backup}`);
+		}
+		await this.write(path, got.plain);
+		this.deps.index.set(path, {
+			base_rev: got.rev,
+			base_hash: hash || got.cipherHash,
+			plain_hash: got.plainHash,
+			local_hash: got.plainHash,
+			mtime,
+		});
+		this.trace(`read-only took ${path} at rev ${got.rev}`);
+	}
+
+	/** Read-only: the server holds no such file any more; keep this device's version aside. */
+	private async dropKeepingCopy(path: string, local: ArrayBuffer | null): Promise<void> {
+		if (local) {
+			const backup = await this.keepAside(path, local);
+			this.trace(`read-only kept ${path} aside as ${backup}; the server has deleted it`);
+			this.suppressed.add(path);
+			await this.deps.app.vault.adapter.remove(path);
+			window.setTimeout(() => this.suppressed.delete(path), 1500);
+			await this.pruneEmptyParents(path);
+		}
+		this.deps.index.remove(path);
+	}
+
+	/**
+	 * Files on this device the server has never had: made here while it was
+	 * read-only, by a plugin, another app or by hand. Turning read-only off would
+	 * send them all, so they are offered first.
+	 */
+	filesOnlyHere(): string[] {
+		const out: string[] = [];
+		for (const raw of this.deps.listLocalFiles()) {
+			const path = toNFC(raw);
+			if (this.isExcluded(path) || this.isLocalOnly(path)) continue;
+			const entry = this.deps.index.get(path);
+			if (!entry || (!entry.folder && entry.base_rev === 0)) out.push(path);
+		}
+		return out.sort();
+	}
+
+	/**
+	 * Edits, deletions and moves made here that the server has not had yet. Turning
+	 * read-only on would put each one back to the server's version.
+	 */
+	pendingChanges(): number {
+		let count = this.deps.index.renames.length;
+		for (const path of this.deps.index.paths()) {
+			const entry = this.deps.index.get(path);
+			if (entry && !entry.folder && entry.dirty && entry.base_rev > 0 && !this.isExcluded(path)) count++;
+		}
+		return count;
+	}
+
+	/**
+	 * Turn read-only on or off between passes, never in the middle of one. Turning
+	 * it off keeps the files in keepHere on this device for good, like a conflict
+	 * copy; every other file only here goes up with the next pass.
+	 */
+	async switchReadOnly(on: boolean, keepHere: string[] = []): Promise<void> {
+		await this.exclusive(async () => {
+			for (const path of keepHere) {
+				this.deps.index.remove(path);
+				this.deps.index.keepLocal(path);
+			}
+			this.deps.settings.readOnly = on;
+			await this.deps.index.save();
+		});
+	}
+
+	/**
+	 * Read-only: renames made here are not sent; the file moves back to the name the
+	 * server knows. Where it cannot (the old name is taken again, or the file is
+	 * gone), the old path is marked changed here and revertLocal brings it back,
+	 * while the file under the new name is left as this device's own.
+	 */
+	private async undoRenames(report: SyncReport): Promise<void> {
+		const adapter = this.deps.app.vault.adapter;
+		for (const rename of [...this.deps.index.renames]) {
+			this.deps.index.clearRename(rename);
+			const moved = this.deps.index.get(rename.to);
+			this.deps.index.remove(rename.to);
+			try {
+				if (moved && (await adapter.exists(rename.to)) && !(await adapter.exists(rename.from))) {
+					this.suppressed.add(rename.from);
+					this.suppressed.add(rename.to);
+					await this.ensureParent(rename.from);
+					await adapter.rename(rename.to, rename.from);
+					window.setTimeout(() => {
+						this.suppressed.delete(rename.from);
+						this.suppressed.delete(rename.to);
+					}, 1500);
+					this.deps.index.set(rename.from, moved);
+					await this.pruneEmptyParents(rename.to);
+					this.trace(`read-only moved ${rename.to} back to ${rename.from}`);
+					continue;
+				}
+			} catch (e) {
+				report.errors.push(`${rename.to}: ${describe(e)}`);
+				this.deps.log(`move back ${rename.to} -> ${rename.from}`, e);
+			}
+			this.deps.index.set(rename.from, {
+				base_rev: rename.base_rev,
+				base_hash: moved?.base_hash ?? "",
+				plain_hash: moved?.plain_hash,
+				local_hash: moved?.local_hash ?? "",
+				mtime: Date.now(),
+				dirty: true,
+			});
+			this.trace(`read-only could not move ${rename.to} back; ${rename.from} comes from the server`);
+		}
+	}
+
+	/**
+	 * Read-only: put every file changed here back to the server's version.
+	 *
+	 * A file edited here is kept aside first, so nothing typed is lost; one deleted
+	 * here comes back. A file the server has never had is left alone: it is this
+	 * device's own, and it is not sent.
+	 */
+	private async revertLocal(client: SyncClient, report: SyncReport): Promise<void> {
+		const adapter = this.deps.app.vault.adapter;
+		for (const path of this.deps.index.paths()) {
+			if (this.deps.stopped()) return;
+			const entry = this.deps.index.get(path);
+			if (!entry || entry.folder || !entry.dirty || entry.base_rev === 0 || this.isExcluded(path)) continue;
+			try {
+				let local: ArrayBuffer | null = null;
+				if (await adapter.exists(path)) {
+					local = await adapter.readBinary(path);
+					if ((await sha256(local)) === entry.plain_hash) {
+						this.deps.index.set(path, { ...entry, dirty: false });
+						continue;
+					}
+				}
+				try {
+					await this.replaceKeepingCopy(client, path, local, entry.base_rev, entry.base_hash || undefined);
+				} catch (e) {
+					if (!(e instanceof ApiError && e.status === 404)) throw e;
+					// That revision is gone: a deletion this device resisted before it was
+					// read-only, or history collected since. Take what the server holds now.
+					try {
+						await this.replaceKeepingCopy(client, path, local);
+					} catch (e2) {
+						// 410: deleted on the server; 404: never there under this name.
+						if (!(e2 instanceof ApiError && (e2.status === 410 || e2.status === 404))) throw e2;
+						await this.dropKeepingCopy(path, local);
+					}
+				}
+				if (local) report.kept++;
+			} catch (e) {
+				report.errors.push(`${path}: ${describe(e)}`);
+				this.deps.log(`put back ${path}`, e);
+			}
+		}
 	}
 
 	/** name, or name with a number added, whichever is not on disk yet. */
@@ -1011,8 +1211,9 @@ export class SyncEngine {
 		if (!(await adapter.exists(path))) {
 			// Deleted here and not sent yet. Downloading it now would undo the deletion
 			// before push ever sees it, and on the device that created the file that
-			// meant it could never be deleted at all.
-			if (known?.dirty) {
+			// meant it could never be deleted at all. A read-only device sends no
+			// deletion, so for it the file simply comes back.
+			if (known?.dirty && !this.readOnly) {
 				report.skipped++;
 				return;
 			}
@@ -1046,6 +1247,14 @@ export class SyncEngine {
 			return;
 		}
 
+		// Both sides changed. A read-only device cannot send a merge or a decision,
+		// so the server's version wins and this device's is kept aside here.
+		if (this.readOnly) {
+			await this.replaceKeepingCopy(client, path, local, entry.rev, entry.hash, entry.size, entry.mtime);
+			report.kept++;
+			return;
+		}
+
 		// Both sides changed. This is the merge path.
 		await this.reconcile(
 			client, path, local, entry.rev, known?.base_rev ?? 0, report, entry.updated_by ?? "",
@@ -1074,7 +1283,14 @@ export class SyncEngine {
 				`matchesBase=${matchesBase} matchesPlain=${matchesPlain}`,
 		);
 		const untouched = matchesBase || matchesPlain;
-		if (untouched) {
+		// A read-only device cannot send its edit back up to beat the deletion, so
+		// the deletion applies and the edit stays here, aside.
+		if (!untouched && this.readOnly) {
+			const backup = await this.keepAside(path, local);
+			this.trace(`read-only kept ${path} aside as ${backup} before applying its deletion`);
+			report.kept++;
+		}
+		if (untouched || this.readOnly) {
 			// Untouched here since we last saw it, so the deletion is safe to apply.
 			this.suppressed.add(path);
 			await adapter.remove(path);
@@ -1312,7 +1528,8 @@ export class SyncEngine {
 		// now (an unmounted drive, cloud files evicted from the device) than somebody's
 		// decision, and sending it would delete those files on every device. Said once
 		// per start; a pass started by hand after that is the answer that sends them.
-		if (!sendHeld && missing.length >= MASS_MISSING_MIN && missing.length * 2 >= examined) {
+		// A read-only device sends no deletion at all: a missing file simply comes back.
+		if (!sendHeld && !this.readOnly && missing.length >= MASS_MISSING_MIN && missing.length * 2 >= examined) {
 			this.heldDeletions = true;
 			report.errors.push(
 				`${missing.length} of ${examined} files are missing from disk. Their deletions ` +

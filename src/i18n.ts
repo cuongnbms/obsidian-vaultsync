@@ -210,6 +210,31 @@ const en: Dict = {
 
 	"error.pull": "Download",
 
+	"settings.readOnly.name": "Read-only device",
+	"settings.readOnly.desc":
+		"This device only reads: it takes every change from the server and sends nothing back. Notes open in reading view. Anything changed here anyway is put back to the server's version on the next sync, with this device's version kept aside as a copy that stays here.",
+	"status.readOnly": "read-only",
+	"readOnly.refused": "Lockstep: this device is read-only. Turn it off in the settings to do this.",
+	"readOnly.kept": "{count} changes made here replaced by the server's version, copies kept",
+	"readOnly.turnedOn": "Lockstep: this device is read-only now.",
+	"readOnly.turnedOff": "Lockstep: this device syncs both ways again.",
+	"readOnly.cancel": "Cancel",
+	"readOnly.on.title": "Make this device read-only",
+	"readOnly.on.pending":
+		"{count} changes made on this device have not reached the server yet. A read-only device puts them back to the server's version, keeping a copy of each here.",
+	"readOnly.on.sync": "Sync them first",
+	"readOnly.on.replace": "Replace with the server's version",
+	"readOnly.on.conflicts":
+		"Lockstep: {count} conflicts are waiting for a decision. Resolve them first: a read-only device cannot send one.",
+	"readOnly.on.migrating":
+		"Lockstep: this device is still encrypting the vault. Let it finish before making it read-only.",
+	"readOnly.on.stillPending":
+		"Lockstep: some changes could not be sent, so the device stays as it was. Try again once the sync goes through.",
+	"readOnly.off.title": "Sync both ways again",
+	"readOnly.off.intro":
+		"{count} files were made on this device and never reached the server. Those left on go up with the next sync; those turned off stay on this device only.",
+	"readOnly.off.confirm": "Turn read-only off",
+
 };
 
 const ru: Dict = {
@@ -408,6 +433,31 @@ const ru: Dict = {
 	"status.pullSummary": "скачано {downloaded}, пропущено {skipped}, копий сохранено {kept} за {secs}с",
 
 	"error.pull": "Скачивание",
+
+	"settings.readOnly.name": "Только чтение",
+	"settings.readOnly.desc":
+		"Это устройство только читает: принимает все изменения с сервера и ничего не отправляет. Заметки открываются в режиме чтения. Всё, что всё же изменено здесь, при следующей синхронизации возвращается к версии сервера, а версия этого устройства сохраняется копией, которая остаётся здесь.",
+	"status.readOnly": "только чтение",
+	"readOnly.refused": "Lockstep: устройство в режиме только чтения. Выключите его в настройках, чтобы сделать это.",
+	"readOnly.kept": "изменений, заменённых версией сервера: {count}, копии сохранены",
+	"readOnly.turnedOn": "Lockstep: устройство теперь только читает.",
+	"readOnly.turnedOff": "Lockstep: устройство снова синхронизирует в обе стороны.",
+	"readOnly.cancel": "Отмена",
+	"readOnly.on.title": "Сделать устройство только для чтения",
+	"readOnly.on.pending":
+		"Изменений на этом устройстве, ещё не дошедших до сервера: {count}. Устройство только для чтения вернёт их к версии сервера, сохранив здесь копию каждого.",
+	"readOnly.on.sync": "Сначала синхронизировать",
+	"readOnly.on.replace": "Заменить версией сервера",
+	"readOnly.on.conflicts":
+		"Lockstep: конфликтов, ждущих решения: {count}. Сначала разрешите их: устройство только для чтения не может отправить решение.",
+	"readOnly.on.migrating":
+		"Lockstep: это устройство ещё шифрует хранилище. Дайте ему закончить, прежде чем включать только чтение.",
+	"readOnly.on.stillPending":
+		"Lockstep: часть изменений не удалось отправить, поэтому режим не изменён. Попробуйте снова, когда синхронизация пройдёт.",
+	"readOnly.off.title": "Снова синхронизировать в обе стороны",
+	"readOnly.off.intro":
+		"Файлов, созданных на этом устройстве и не дошедших до сервера: {count}. Включённые уйдут со следующей синхронизацией, выключенные останутся только здесь.",
+	"readOnly.off.confirm": "Выключить только чтение",
 
 };
 

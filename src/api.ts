@@ -73,6 +73,14 @@ export class ApiError extends Error {
 	}
 }
 
+/** A write asked of a client on a read-only device. Nothing was sent. */
+export class ReadOnlyError extends Error {
+	constructor(method: string, path: string) {
+		super(`read-only device: ${method} ${path} was not sent`);
+		this.name = "ReadOnlyError";
+	}
+}
+
 export class SyncClient {
 	constructor(
 		private baseUrl: string,
@@ -85,6 +93,11 @@ export class SyncClient {
 		 * nothing above it has to know whether names are hidden at all.
 		 */
 		private paths: PathCipher | null = null,
+		/**
+		 * A device that only reads. Every request that would change the vault on the
+		 * server is refused here, before it leaves, whatever asked for it.
+		 */
+		private readOnly = false,
 	) {}
 
 	/** The name the server knows this path by. */
@@ -106,6 +119,7 @@ export class SyncClient {
 		path: string,
 		opts: { body?: ArrayBuffer | string; headers?: Record<string, string> } = {},
 	): Promise<RequestUrlResponse> {
+		if (this.readOnly && !readsOnly(method, path)) throw new ReadOnlyError(method, path);
 		const resp = await requestUrl({
 			url: this.url(path),
 			method,
@@ -338,6 +352,15 @@ export class SyncClient {
 		});
 		return resp.json as WriteResult;
 	}
+}
+
+/**
+ * Whether a request leaves the vault on the server as it was. Linking a new device
+ * mints a token and touches no file, so a read-only device may still do it.
+ */
+function readsOnly(method: string, path: string): boolean {
+	if (method === "GET" || method === "HEAD") return true;
+	return method === "POST" && (path === "/join" || path === "/tokens");
 }
 
 function safeJson(resp: RequestUrlResponse): Record<string, unknown> {
