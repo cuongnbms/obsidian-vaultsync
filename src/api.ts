@@ -100,6 +100,11 @@ export class SyncClient {
 		private readOnly = false,
 	) {}
 
+	/** True when names are hidden, which means the vault seals the content of every file. */
+	get hidesPaths(): boolean {
+		return this.paths !== null;
+	}
+
 	/** The name the server knows this path by. */
 	private async remote(path: string): Promise<string> {
 		return this.paths ? this.paths.encrypt(path) : path;

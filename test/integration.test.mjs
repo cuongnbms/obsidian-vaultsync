@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { startServer, makeDevice } from "./harness/device.mjs";
 import { VaultCipher } from "./_crypto.mjs";
+import { SyncClient } from "./_sync-engine.mjs";
 
 async function twoDevices(options = {}) {
 	const server = await startServer();
@@ -768,6 +769,39 @@ test("with paths hidden, the server never learns a file name", async (t) => {
 	await b.sync();
 	assert.equal(await b.vault.read("Job search/Applications.md"), "sent to three places\n");
 	assert.equal(await b.vault.read("Job search/Curriculum.md"), "the current version\n");
+});
+
+test("with paths hidden, content the server wrote in the clear is refused", async (t) => {
+	const server = await startServer();
+	const { cipher } = await VaultCipher.create("shared passphrase", {
+		iterations: 1,
+		memory_kib: 64,
+	});
+	const pathCipher = await cipher.pathCipher();
+	const opts = { cipher, pathCipher };
+	const a = await makeDevice(server, "mac", server.tokens.a, opts);
+	const b = await makeDevice(server, "iphone", server.tokens.b, opts);
+	t.after(async () => {
+		await a.cleanup();
+		await b.cleanup();
+		await server.stop();
+	});
+
+	await a.edit("plan.md", "the real plan\n");
+	await a.sync();
+	await b.sync();
+
+	// The server cannot read the vault, but it can store anything under a name it
+	// has seen. Every file in a vault that hides names is sealed, so readable
+	// content there was not written by a device with the key. It used to be
+	// written to disk as it came, as if from before encryption was turned on.
+	const [stored] = (await server.rawChanges(server.tokens.a)).entries;
+	const forger = new SyncClient(server.url, server.tokens.a, "server", null);
+	await forger.putFile(stored.path, stored.rev, new TextEncoder().encode("forged\n").buffer, Date.now());
+
+	const report = await b.sync();
+	assert.equal(await b.vault.read("plan.md"), "the real plan\n");
+	assert.match(report.errors.join("\n"), /plan\.md: .*not encrypted/);
 });
 
 test("hidden paths survive renames and deletions between devices", async (t) => {

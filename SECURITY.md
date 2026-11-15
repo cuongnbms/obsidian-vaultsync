@@ -23,6 +23,19 @@ encryption below what it claims.
 ciphertext under sealed file and folder names, and can read neither. It does still see
 sizes, timings, and the shape of the folder tree.
 
+**The server cannot read the vault, but it can still tamper with it.** Encryption promises
+confidentiality from the server, not integrity against it. What the plugin closes and what it
+does not:
+
+- In a vault that hides names, content that is not sealed is refused. Every file there is
+  sealed by the devices with the key, so readable content can only have come from the server.
+  A vault that keeps readable names still accepts readable content, because that is how a
+  vault encrypted gradually reads its older files.
+- A sealed file is not bound to its name. The server can swap the content of two files, put
+  an older sealed revision back, or copy one file's content under another name, and the
+  plugin accepts it as a change made by a device. Binding content to its path needs a change
+  to the envelope format and is not done yet.
+
 **Turning encryption on later erases the readable history.** A vault that was on the server
 readable is re-uploaded sealed, and the readable copies are then deleted and purged at once,
 content and revisions, rather than kept for the retention window. While that runs the server
