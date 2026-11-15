@@ -1,4 +1,4 @@
-module github.com/stephansergeev/obsidian-lockstep-sync/server
+module github.com/cuongnbms/obsidian-lockstep-sync/server
 
 go 1.24
 

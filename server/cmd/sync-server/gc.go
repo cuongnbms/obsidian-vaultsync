@@ -7,8 +7,8 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/store"
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/vault"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/store"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/vault"
 )
 
 // collect prunes history and removes content nothing points at.

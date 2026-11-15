@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stephansergeev/obsidian-lockstep-sync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
 )
 
 // The join page: the one address a new device needs.

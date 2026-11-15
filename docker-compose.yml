@@ -10,7 +10,7 @@
 
 services:
   lockstep:
-    image: ghcr.io/stephansergeev/obsidian-lockstep-sync:latest
+    image: ghcr.io/cuongnbms/obsidian-lockstep-sync:latest
     container_name: lockstep-sync
     restart: unless-stopped
     # Loopback only. Put a reverse proxy with TLS in front of it, the way the
