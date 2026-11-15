@@ -7,10 +7,12 @@
  * device left open on a desk or in a pocket asked every fifteen seconds all day
  * for nothing. The wait doubles after each pass that moved nothing, up to a cap,
  * and drops back to the base as soon as anything happens: an edit here, a change
- * that came down, or the app being brought back to the front.
+ * that came down, or the app being brought back to the front after a while.
  */
 export class IdleBackoff {
 	private current: number;
+	/** When the last pass finished, in ms. */
+	private lastPass = 0;
 
 	constructor(
 		private readonly base: number,
@@ -24,18 +26,26 @@ export class IdleBackoff {
 		return this.current;
 	}
 
-	/** Whether the wait has grown past the base, i.e. the device has been idle. */
-	get backedOff(): boolean {
-		return this.current > this.base;
+	/** A pass finished: keep checking often if it moved anything, back off if not. */
+	finished(moved: boolean, now: number): void {
+		this.lastPass = now;
+		this.current = moved ? this.base : Math.min(this.current * 2, this.max);
 	}
 
-	/** A pass found nothing to do: wait longer next time. */
-	idle(): void {
-		this.current = Math.min(this.current * 2, this.max);
-	}
-
-	/** Something happened: check again soon. */
+	/** Something happened here, an edit: check again soon. */
 	active(): void {
 		this.current = this.base;
+	}
+
+	/**
+	 * The app came back to the front. Worth a check at once only when the wait has
+	 * grown and the last pass is at least a base interval old; otherwise switching
+	 * windows, which on desktop happens all the time and already flushes on the way
+	 * out, would start a pass every time. Returns whether to check now.
+	 */
+	wake(now: number): boolean {
+		if (this.current <= this.base || now - this.lastPass < this.base) return false;
+		this.current = this.base;
+		return true;
 	}
 }

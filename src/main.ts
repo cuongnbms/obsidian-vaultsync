@@ -246,13 +246,11 @@ export default class LockstepPlugin extends Plugin {
 
 	/**
 	 * Coming back to the app after a quiet spell checks at once rather than at the
-	 * end of a wait that may have grown to minutes. While checks are still at the
-	 * base pace, switching windows triggers nothing extra.
+	 * end of a wait that may have grown to minutes. Switching windows right after a
+	 * pass, or while checks are at the base pace, triggers nothing extra.
 	 */
 	private wakeFromIdle(): void {
-		if (!this.backoff.backedOff) return;
-		this.backoff.active();
-		void this.syncNow(true);
+		if (this.backoff.wake(Date.now())) void this.syncNow(true);
 	}
 
 	override onunload(): void {
@@ -832,15 +830,14 @@ export default class LockstepPlugin extends Plugin {
 			const report = await this.engine.sync(!quiet);
 			const secs = ((Date.now() - started) / 1000).toFixed(1);
 			this.report(report, secs, quiet);
-			if (moved(report)) this.backoff.active();
-			else this.backoff.idle();
+			this.backoff.finished(moved(report), Date.now());
 			if (report.uploaded + report.downloaded > 0 && report.errors.length === 0) {
 				this.lastSummary = t(this.encryption.cipher.enabled ? "progress.doneEncrypted" : "progress.done");
 				for (const el of this.progressTargets) el.setText(this.lastSummary);
 			}
 		} catch (e) {
 			// A server that cannot be reached is not asked every fifteen seconds either.
-			this.backoff.idle();
+			this.backoff.finished(false, Date.now());
 			this.reportError(t("error.sync"), e);
 		} finally {
 			this.armAutoSync();
