@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.2
+
+A device catching up on a large vault fetches new notes eight at a time instead of one
+after another. The first sync of a vault of thousands of notes onto a new device
+waited on one round trip per note; with eight in flight that wait shrinks by up to
+eight times. Only files the device has never had, small enough to fetch whole, go
+together. Deletions, renames, merges and large attachments are still applied one at a
+time, in the order the server logged them, and the sync position is saved only once
+every file before it has landed, so an app closed mid-sync loses nothing. Sending is
+unchanged. Only the plugin changed.
+
 ## 1.1.1
 
 Set passphrase works when pressed with the mouse. The press takes the focus out of
