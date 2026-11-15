@@ -72,6 +72,13 @@ The Exclusions setting now says that a line matches every path starting with it,
 so a folder is written with a trailing slash: `Private` also excludes
 `Private notes.md`, and `Private/` does not. Matching itself is unchanged.
 
+In a vault that hides file names, the server could replace a file's content with
+readable text, and the plugin wrote it to disk as if it were a note from before
+encryption. Every file in such a vault is sealed, so readable content there is now
+refused and reported once, and the file on disk is left as it was. SECURITY.md now
+says what the server can still do: swap sealed files between names or put an older
+sealed revision back.
+
 ## 1.0.10
 
 A file created again at a path that had been deleted never reached the server, and

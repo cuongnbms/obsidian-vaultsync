@@ -7,7 +7,7 @@ export { SyncClient, ReadOnlyError } from "./api";
 import { merge3 } from "./diff3";
 import type { DeferredChange, LocalIndex, PendingRename } from "./index-store";
 import { conflictName, defaultDeviceName, sha256, toNFC } from "./paths";
-import { plaintext as plaintextCipher, type Cipher, type PathCipher } from "./crypto";
+import { isEnvelope, plaintext as plaintextCipher, type Cipher, type PathCipher } from "./crypto";
 import type { SyncSettings } from "./settings";
 
 /**
@@ -1340,6 +1340,14 @@ export class SyncEngine {
 		// leaves slices behind, and when the file is next fetched whole (it shrank) this
 		// is the only place they go. It costs a hash of the name and one exists.
 		await this.dropSlices(path);
+		// Readable content is let through for a vault encrypted gradually, but a vault
+		// that hides names seals every file from its first one: names are only hidden
+		// in a vault that starts empty, or once encryption has erased the readable
+		// copies. Readable content under a hidden name was not written by a device
+		// with the key, and the server is the only other party that can write.
+		if (client.hidesPaths && !isEnvelope(got.data)) {
+			throw new Error("not encrypted, so not written by a device with the key; refused");
+		}
 		const plain = await this.cipher().decrypt(got.data);
 		return { plain, cipherHash, plainHash: await sha256(plain), rev: got.rev || rev || 0 };
 	}
