@@ -72,6 +72,12 @@ The Exclusions setting now says that a line matches every path starting with it,
 so a folder is written with a trailing slash: `Private` also excludes
 `Private notes.md`, and `Private/` does not. Matching itself is unchanged.
 
+In a vault that hides file names, a device could not unlock once it had been
+locked out: a wrong passphrase corrected, a passphrase typed after the first sync
+had already stopped at the lock, or another device finishing encrypting the vault
+all left it locked until Obsidian was restarted. It now unlocks as soon as the
+right passphrase is there.
+
 ## 1.0.10
 
 A file created again at a path that had been deleted never reached the server, and

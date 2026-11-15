@@ -230,7 +230,11 @@ export class EncryptionController {
 			this.cipherStatus = t("encryption.off");
 			return;
 		}
-		const client = this.ports.client(false);
+		// The key record holds no names, so it is read through a client that needs no
+		// path key. The ordinary one refuses to exist while the vault hides names and
+		// the path key is not open, which is exactly when this has to run: through it,
+		// a wrong passphrase could not be corrected without restarting Obsidian.
+		const client = this.pathKeyMissing() ? this.ports.plainClient() : this.ports.client(false);
 		if (!client) return;
 		try {
 			const stored = (await client.getVaultKey()) as VaultKeyRecord | null;

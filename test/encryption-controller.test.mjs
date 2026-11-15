@@ -208,3 +208,46 @@ test("the first upload of a vault into an empty server waits for Sync now", asyn
 	assert.match(await controller.reasonNotToSync(false), /./, "not on its own");
 	assert.equal(await controller.reasonNotToSync(true), "", "a press by hand is the decision");
 });
+
+// A device that has learned the vault hides names, and has no path key yet, could
+// not build a client. Unlocking asked the server for the key through that client,
+// so it gave up without a word, and only restarting Obsidian got the device in.
+test("once another device has finished encrypting, this one joins without a restart", async () => {
+	const { controller, server } = setup({
+		passphrase: "right",
+		key: await keyRecord("right", { migration: { device: "desktop", started: 1, mine: false } }),
+	});
+	await controller.applyEncryption(true);
+	assertClosed(controller);
+	assert.equal(controller.migrationElsewhere(), "desktop");
+
+	delete server.key.migration;
+	await controller.applyEncryption(true);
+	assert.equal(controller.cipher.enabled, true, "not settled: the next attempt joins");
+});
+
+
+test("a device locked out of a vault that hides names opens once the passphrase is typed", async () => {
+	const { controller, settings } = setup({ key: await keyRecord("right", { paths: "encrypted" }) });
+	await controller.reasonNotToSync();
+	assert.equal(controller.isLocked(), true);
+
+	settings.passphrase = "right";
+	await controller.applyEncryption(false);
+	assert.equal(controller.cipher.enabled, true);
+	assert.equal(controller.isLocked(), false);
+});
+
+
+test("a wrong passphrase on a vault that hides names can be corrected", async () => {
+	const { controller, settings } = setup({
+		passphrase: "wrong",
+		key: await keyRecord("right", { paths: "encrypted" }),
+	});
+	await assert.rejects(controller.applyEncryption(false));
+
+	settings.passphrase = "right";
+	await controller.applyEncryption(false);
+	assert.equal(controller.cipher.enabled, true);
+	assert.equal(controller.isLocked(), false);
+});
