@@ -30,6 +30,19 @@ const MERGE_SIZE_LIMIT = 1024 * 1024;
  */
 const MASS_MISSING_MIN = 10;
 
+/**
+ * How many new files a pull fetches at once. A device catching up on thousands of
+ * notes spent its first sync waiting on one round trip per note. Each one is a
+ * small GET; eight in flight is the same order as the four uploads push runs.
+ */
+const DOWNLOADS_IN_FLIGHT = 8;
+
+/** A change that a pull may apply alongside its neighbours. See joinsRun. */
+interface RunEntry {
+	entry: ChangeEntry;
+	path: string;
+}
+
 export interface SyncReport {
 	downloaded: number;
 	uploaded: number;
@@ -171,6 +184,8 @@ export function listPaths(paths: string[], shown = 5): string {
 export class SyncEngine {
 	/** Paths this plugin is writing right now, so its own writes do not look like edits. */
 	private suppressed = new Set<string>();
+	/** The tail of the folder creations in progress. See ensureParent. */
+	private makingFolders: Promise<void> = Promise.resolve();
 	/**
 	 * The cipher for the duration of one pass, taken once at its start. Reading it
 	 * live meant that wiping the passphrase mid-pass swapped the cipher under a
@@ -350,9 +365,16 @@ export class SyncEngine {
 		const slash = path.lastIndexOf("/");
 		if (slash <= 0) return;
 		const dir = path.slice(0, slash);
-		if (!(await this.deps.app.vault.adapter.exists(dir))) {
-			await this.deps.app.vault.adapter.mkdir(dir);
-		}
+		const adapter = this.deps.app.vault.adapter;
+		if (await adapter.exists(dir)) return;
+		// Folders are made one at a time, each asking again first. Downloads in flight
+		// together into a new folder can all find it missing, and an adapter that
+		// refuses to make a folder already there would fail all of them but the first.
+		const make = this.makingFolders.then(async () => {
+			if (!(await adapter.exists(dir))) await adapter.mkdir(dir);
+		});
+		this.makingFolders = make.catch(() => undefined);
+		await make;
 	}
 
 	/**
@@ -1019,6 +1041,32 @@ export class SyncEngine {
 				await this.deps.index.save();
 			}
 		};
+		// A catch-up pull has a denominator: the number of files the server holds. It
+		// is only exact for a device starting from nothing, which is exactly when
+		// somebody is watching the number.
+		const progress = (path: string) => {
+			const arrived = report.downloaded + report.renamed + report.merged;
+			const total = this.deps.index.lastSeq === 0 || arrived > 0 ? (this.deps.serverFileCount?.() ?? 0) : 0;
+			this.deps.onProgress?.(arrived, arrived >= 5 ? total : 0, path);
+		};
+		// New files waiting to be fetched together. Anything else is applied alone,
+		// in log order, once every file ahead of it has landed.
+		const run: RunEntry[] = [];
+		const runFiles = new Set<string>();
+		const runDirs = new Set<string>();
+		/** False when the plugin stopped before every file in the run was tried. */
+		const flush = async (): Promise<boolean> => {
+			if (run.length === 0) return true;
+			const batch = run.splice(0);
+			runFiles.clear();
+			runDirs.clear();
+			if (!(await this.applyRun(client, batch, report, progress))) return false;
+			// Only now, with every file in the run applied or deferred: a cursor saved
+			// past a download still in flight would never be offered that entry again.
+			this.deps.index.setLastSeq((batch[batch.length - 1] as RunEntry).entry.seq);
+			await checkpoint();
+			return true;
+		};
 		try {
 			await this.retryDeferred(client, report);
 			for (;;) {
@@ -1026,6 +1074,11 @@ export class SyncEngine {
 				for (const entry of page.entries) {
 					if (this.deps.stopped()) return;
 					const path = toNFC(entry.path);
+					if (await this.joinsRun(entry, path, runFiles, runDirs)) {
+						run.push({ entry, path });
+						continue;
+					}
+					if (!(await flush())) return;
 					// A path that is queued to move away is already spoken for. Touching it
 					// here would recreate it moments before our own rename deletes it.
 					if (this.deps.index.renames.some((r) => r.from === path)) {
@@ -1051,19 +1104,82 @@ export class SyncEngine {
 					}
 					this.deps.index.setLastSeq(entry.seq);
 					await checkpoint();
-					// A catch-up pull has a denominator: the number of files the server
-					// holds. It is only exact for a device starting from nothing, which
-					// is exactly when somebody is watching the number.
-					const arrived = report.downloaded + report.renamed + report.merged;
-					const total = this.deps.index.lastSeq === 0 || arrived > 0 ? (this.deps.serverFileCount?.() ?? 0) : 0;
-					this.deps.onProgress?.(arrived, arrived >= 5 ? total : 0, path);
+					progress(path);
 				}
+				if (!(await flush())) return;
 				this.deps.index.setLastSeq(page.next_seq);
 				if (!page.has_more || this.deps.stopped()) break;
 			}
 		} finally {
 			await checkpoint(true);
 		}
+	}
+
+	/**
+	 * Whether a change can be fetched alongside the others in the run: a file this
+	 * device has never had, small enough to fetch whole. Such a change is a download
+	 * and nothing else, so its order against its neighbours does not matter.
+	 *
+	 * Everything else waits its turn. A deletion can prune the folder a neighbour is
+	 * landing in; a rename or a merge reads what is on disk; a large file is fetched
+	 * in slices, and several at once would hold hundreds of megabytes on a phone.
+	 * Two paths that differ only in case are one file on macOS, iOS and Windows, and
+	 * a file named like a folder another path needs cannot both land, so neither
+	 * shares a run with the other.
+	 */
+	private async joinsRun(
+		entry: ChangeEntry,
+		path: string,
+		runFiles: Set<string>,
+		runDirs: Set<string>,
+	): Promise<boolean> {
+		if (entry.folder || entry.deleted || entry.renamed_from) return false;
+		if (entry.size > this.chunkBytes()) return false;
+		if (this.isExcluded(path) || this.deps.index.renames.some((r) => r.from === path)) return false;
+		if (this.deps.index.get(path)) return false;
+		const key = path.toLowerCase();
+		const dirs: string[] = [];
+		for (let i = key.indexOf("/"); i > 0; i = key.indexOf("/", i + 1)) dirs.push(key.slice(0, i));
+		if (runFiles.has(key) || runDirs.has(key) || dirs.some((d) => runFiles.has(d))) return false;
+		if (await this.deps.app.vault.adapter.exists(path)) return false;
+		runFiles.add(key);
+		for (const d of dirs) runDirs.add(d);
+		return true;
+	}
+
+	/**
+	 * Apply the run, a few files in flight at once. Each failure is deferred where it
+	 * happens, so nothing ends the run early and nothing is still landing when this
+	 * returns. Returns false when the plugin stopped before every file was started;
+	 * the caller then leaves the cursor where it was.
+	 */
+	private async applyRun(
+		client: SyncClient,
+		run: RunEntry[],
+		report: SyncReport,
+		progress: (path: string) => void,
+	): Promise<boolean> {
+		let next = 0;
+		const worker = async (): Promise<void> => {
+			while (next < run.length) {
+				if (this.deps.stopped()) return;
+				const { entry, path } = run[next++] as RunEntry;
+				try {
+					await this.applyRemote(client, entry, path, report);
+				} catch (e) {
+					this.defer(path, entry, e, report);
+				}
+				progress(path);
+			}
+		};
+		// Settled, not all: should anything throw past the deferral, the others are
+		// still writing, and the pass must not go on to push while they do.
+		const outcomes = await Promise.allSettled(
+			Array.from({ length: Math.min(DOWNLOADS_IN_FLIGHT, run.length) }, worker),
+		);
+		const failed = outcomes.find((o): o is PromiseRejectedResult => o.status === "rejected");
+		if (failed) throw failed.reason;
+		return next >= run.length;
 	}
 
 	private defer(path: string, entry: ChangeEntry, e: unknown, report: SyncReport): void {
