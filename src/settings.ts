@@ -273,6 +273,9 @@ export class SyncSettingsTab extends PluginSettingTab {
 		const elsewhere = this.plugin.migrationElsewhere();
 
 		row.settingEl.addClass("lockstep-row-stacked");
+		// A redraw (update() after leaving the field) hands back the same row with
+		// its controls cleared but anything added beside them still there.
+		clearOwn(row, "lockstep-meter");
 		const meter = row.settingEl.createDiv({ cls: "lockstep-meter" });
 		const bar = meter.createDiv({ cls: "lockstep-meter-bar" });
 		const segments = [0, 1, 2].map(() => bar.createDiv({ cls: "lockstep-meter-segment" }));
@@ -388,6 +391,7 @@ export class SyncSettingsTab extends PluginSettingTab {
 	/** A line under a row where a sync in progress writes its percentage. */
 	private progressLine(row: Setting): HTMLElement {
 		row.settingEl.addClass("lockstep-row-stacked");
+		clearOwn(row, "lockstep-progress");
 		return row.settingEl.createDiv({ cls: "lockstep-progress" });
 	}
 
@@ -568,4 +572,9 @@ export class SyncSettingsTab extends PluginSettingTab {
 			],
 		};
 	}
+}
+
+/** Remove what an earlier render of this row added beside its controls. */
+function clearOwn(row: Setting, cls: string): void {
+	row.settingEl.querySelectorAll(`:scope > .${cls}`).forEach((el) => el.remove());
 }
