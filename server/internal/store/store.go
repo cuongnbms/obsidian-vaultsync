@@ -224,11 +224,23 @@ func (s *Store) Get(path string) (File, error) {
 
 // Changes returns the log delta: entries with seq strictly greater than since,
 // ordered by seq.
+// changesGap runs between an empty page and the seq read after it. Tests only.
+var changesGap func()
+
 func (s *Store) Changes(since int64, limit int) (entries []File, nextSeqOut int64, hasMore bool, err error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 500
 	}
-	rows, err := s.rdb.Query(`SELECT `+fileCols+` FROM files WHERE seq > ? ORDER BY seq LIMIT ?`, since, limit)
+	// One read transaction, so the page and the seq that answers an empty one come
+	// from the same snapshot. Read separately, the seq could count a write that
+	// committed after the page was read, and the client's cursor would move past
+	// a change it was never shown.
+	tx, err := s.rdb.Begin()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT `+fileCols+` FROM files WHERE seq > ? ORDER BY seq LIMIT ?`, since, limit)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -243,11 +255,17 @@ func (s *Store) Changes(since int64, limit int) (entries []File, nextSeqOut int6
 	if err := rows.Err(); err != nil {
 		return nil, 0, false, err
 	}
+	rows.Close()
 	if len(entries) == 0 {
-		cur, err := s.Seq()
-		if err != nil {
+		if changesGap != nil {
+			changesGap()
+		}
+		var v sql.NullInt64
+		err := tx.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key='seq'`).Scan(&v)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, false, err
 		}
+		cur := v.Int64
 		if cur < since {
 			cur = since
 		}

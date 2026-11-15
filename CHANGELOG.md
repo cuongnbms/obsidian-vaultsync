@@ -8,7 +8,9 @@ its history, on the first sweep after it was deleted. It now counts from the del
 Restore shows the date it was deleted rather than the last edit. Deletions made before this
 version cannot say when they happened; each gets a full window from the upgrade. An upload
 can no longer lose its content to a sweep running at the same moment, and content written
-to disk survives a power cut as reliably as the record that points at it.
+to disk survives a power cut as reliably as the record that points at it. A change saved
+on one device at the very moment another device found nothing new is no longer skipped by
+that device for good.
 
 An idle device asks the server less often: the wait doubles after every check that finds
 nothing, up to five minutes, and returns to fifteen seconds on an edit, an incoming change,
