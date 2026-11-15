@@ -251,7 +251,7 @@ export class EncryptionController {
 				this.locked = true;
 				this.cipherStatus = t("encryption.inProgressElsewhere", { device: this.migration.device });
 				this.ports.setStatus(this.cipherStatus);
-				if (!quiet) this.ports.notice(`Lockstep: ${this.cipherStatus}`, 8000);
+				if (!quiet) this.ports.notice(`VaultSync: ${this.cipherStatus}`, 8000);
 				return;
 			}
 			if (stored) {
@@ -274,7 +274,7 @@ export class EncryptionController {
 				// Whether a vault is actually hidden is the one thing somebody turning
 				// this on wants confirmed. A grey caption under a text field is not a
 				// confirmation.
-				if (!quiet) this.ports.notice(`Lockstep: ${this.cipherStatus}`, 8000);
+				if (!quiet) this.ports.notice(`VaultSync: ${this.cipherStatus}`, 8000);
 				// And start at once. Waiting for the timer meant a minute of nothing
 				// happening on a device that had just been told everything was fine.
 				void this.ports.syncNow(true);
@@ -289,7 +289,7 @@ export class EncryptionController {
 				this._pathCipher = null;
 				this.locked = true;
 				this.cipherStatus = t("encryption.pressSet");
-				if (!quiet) this.ports.notice(`Lockstep: ${this.cipherStatus}`, 8000);
+				if (!quiet) this.ports.notice(`VaultSync: ${this.cipherStatus}`, 8000);
 			} else {
 				// The same key record whether the vault starts empty or full: names
 				// hidden, content hidden. A vault that already holds readable files is
@@ -307,7 +307,7 @@ export class EncryptionController {
 						this._pathCipher = null;
 						this.locked = true;
 						this.cipherStatus = t("encryption.excludedOnServer", { paths: listPaths(excluded) });
-						this.ports.notice(`Lockstep: ${this.cipherStatus}`, 15000);
+						this.ports.notice(`VaultSync: ${this.cipherStatus}`, 15000);
 						return;
 					}
 				}
@@ -341,13 +341,13 @@ export class EncryptionController {
 			if (e instanceof WrongPassphrase) {
 				this.cipherStatus = t("encryption.wrong");
 				this.settledPassphrase = this.settings.passphrase;
-				if (!quiet) this.ports.notice(`Lockstep: ${this.cipherStatus}`, 10000);
+				if (!quiet) this.ports.notice(`VaultSync: ${this.cipherStatus}`, 10000);
 			} else {
 				this.cipherStatus = t("encryption.failed", {
 					message: e instanceof Error ? e.message : String(e),
 				});
 				if (!quiet && !isUnreachable(this.cipherStatus)) {
-					this.ports.notice(`Lockstep: ${this.cipherStatus}`, 10000);
+					this.ports.notice(`VaultSync: ${this.cipherStatus}`, 10000);
 				}
 			}
 			throw e;
@@ -403,7 +403,7 @@ export class EncryptionController {
 						this.ports.setStatus(this.cipherStatus);
 						if (!this.announcedEncryptedVault) {
 							this.announcedEncryptedVault = true;
-							this.ports.notice(`Lockstep: ${this.cipherStatus}`, 15000);
+							this.ports.notice(`VaultSync: ${this.cipherStatus}`, 15000);
 						}
 						return this.cipherStatus;
 					}
@@ -428,7 +428,7 @@ export class EncryptionController {
 		this.ports.setStatus(this.cipherStatus);
 		if (!this.announcedEncryptedVault) {
 			this.announcedEncryptedVault = true;
-			this.ports.notice(`Lockstep: ${this.cipherStatus}`, 15000);
+			this.ports.notice(`VaultSync: ${this.cipherStatus}`, 15000);
 		}
 		return this.cipherStatus;
 	}

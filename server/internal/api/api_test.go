@@ -15,9 +15,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/api"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/vault"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/api"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/vault"
 )
 
 // Every scenario below checks exactly one invariant:
@@ -704,7 +704,11 @@ func TestJoinPageLeadsToATokenOnce(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("join page: %d %s", resp.StatusCode, page)
 	}
-	for _, want := range []string{"obsidian://lockstep-setup?", "code=" + made.Code, "device=phone", "Install", "Connect"} {
+	for _, want := range []string{
+		"obsidian://vaultsync-setup?", "code=" + made.Code, "device=phone", "Install", "Connect",
+		// Not in the community catalogue: BRAT first, then the plugin from its repository.
+		"obsidian://show-plugin?id=obsidian42-brat", "obsidian://brat?plugin=cuongnbms/obsidian-vaultsync",
+	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("join page lacks %q:\n%s", want, page)
 		}

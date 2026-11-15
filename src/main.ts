@@ -163,7 +163,7 @@ export default class LockstepPlugin extends Plugin {
 					new Notice(t("notice.conflictQueued", { path }), 12000);
 				}
 			},
-			log: (message, error) => console.warn(`[lockstep-sync] ${message}`, error ?? ""),
+			log: (message, error) => console.warn(`[vaultsync] ${message}`, error ?? ""),
 		});
 
 		this.addSettingTab(new SyncSettingsTab(this.app, this));
@@ -179,7 +179,7 @@ export default class LockstepPlugin extends Plugin {
 		});
 		// A link that sets up another device. Registered before anything else, so a
 		// device that has just been installed can be configured by opening one.
-		this.registerObsidianProtocolHandler("lockstep-setup", (params) => {
+		this.registerObsidianProtocolHandler("vaultsync-setup", (params) => {
 			void this.applySetupLink(params);
 		});
 
@@ -518,7 +518,7 @@ export default class LockstepPlugin extends Plugin {
 				const url = encodeURIComponent(this.settings.serverUrl);
 				const token = encodeURIComponent(issued.token);
 				const device = encodeURIComponent(name);
-				return `obsidian://lockstep-setup?url=${url}&token=${token}&device=${device}`;
+				return `obsidian://vaultsync-setup?url=${url}&token=${token}&device=${device}`;
 			},
 			this.encryptionWanted(),
 			this.settings.serverUrl,
@@ -659,7 +659,7 @@ export default class LockstepPlugin extends Plugin {
 		// behind must stall the sync here rather than reach the network.
 		if (this.encryption.pathKeyMissing()) {
 			this.traceLine("refused to build a client: names are sealed and the path key is not ready");
-			if (complain) new Notice(`Lockstep: ${t("encryption.locked")}`, 8000);
+			if (complain) new Notice(`VaultSync: ${t("encryption.locked")}`, 8000);
 			return null;
 		}
 		return new SyncClient(
@@ -813,7 +813,7 @@ export default class LockstepPlugin extends Plugin {
 	private async encryptFromCommand(): Promise<void> {
 		if (this.refusedReadOnly()) return;
 		if (!this.settings.passphrase) {
-			new Notice(`Lockstep: ${t("encryption.pressSet")}`, 8000);
+			new Notice(`VaultSync: ${t("encryption.pressSet")}`, 8000);
 			return;
 		}
 		try {
@@ -901,7 +901,7 @@ export default class LockstepPlugin extends Plugin {
 			// The other barriers announce themselves from the guard; this one does not,
 			// since offline it would on every pass, so a sync asked for by hand says it.
 			if (!quiet && status === t("status.keyUnknown")) {
-				new Notice(`Lockstep: ${status}`, 8000);
+				new Notice(`VaultSync: ${status}`, 8000);
 			}
 		} else if (!quiet || report.conflicts > 0 || report.kept > 0) {
 			new Notice(t("notice.syncDone", { summary: line }));
@@ -927,7 +927,7 @@ export default class LockstepPlugin extends Plugin {
 	private blocked(quiet: boolean): boolean {
 		if (!this.encryption.isLocked()) return false;
 		this.setStatus(this.encryption.status);
-		if (!quiet) new Notice(`Lockstep: ${this.encryption.status}`, 8000);
+		if (!quiet) new Notice(`VaultSync: ${this.encryption.status}`, 8000);
 		return true;
 	}
 
@@ -954,7 +954,7 @@ export default class LockstepPlugin extends Plugin {
 			if (report.barrier) {
 				// Asked for by hand, so it is said even if a pass said it before.
 				this.setStatus(report.barrier);
-				new Notice(`Lockstep: ${report.barrier}`, 8000);
+				new Notice(`VaultSync: ${report.barrier}`, 8000);
 				return;
 			}
 			const secs = ((Date.now() - started) / 1000).toFixed(1);
@@ -985,7 +985,7 @@ export default class LockstepPlugin extends Plugin {
 				: e instanceof Error
 					? e.message
 					: String(e);
-		console.error(`[lockstep-sync] ${what}:`, e);
+		console.error(`[vaultsync] ${what}:`, e);
 		this.setStatus(t("status.error", { message: msg }));
 		if (isUnreachable(msg)) {
 			if (this.announcedUnreachable) return;

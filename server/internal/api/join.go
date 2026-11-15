@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/auth"
 )
 
 // The join page: the one address a new device needs.
@@ -27,8 +27,13 @@ import (
 // of the screen is worthless by the evening.
 const joinTTL = 15 * time.Minute
 
-// Where the plugin comes from: the community catalogue, opened inside Obsidian.
-const pluginID = "lockstep-sync"
+// Where the plugin comes from. It is not in the community catalogue, so BRAT
+// installs it from the GitHub releases of its repository: BRAT itself from the
+// catalogue, then BRAT's own obsidian://brat link with the repository filled in.
+const (
+	bratID     = "obsidian42-brat"
+	pluginRepo = "cuongnbms/obsidian-vaultsync"
+)
 
 func (s *Server) createJoin(w http.ResponseWriter, r *http.Request, c ctx) {
 	var req struct {
@@ -105,8 +110,9 @@ func (s *Server) joinPage(w http.ResponseWriter, r *http.Request) {
 		Device:      j.Device,
 		Host:        r.Host,
 		Minutes:     int(time.Until(j.ExpiresAt).Minutes()) + 1,
-		CatalogLink: template.URL("obsidian://show-plugin?id=" + pluginID),
-		ConnectLink: template.URL("obsidian://lockstep-setup?" + q.Encode()),
+		BratLink:    template.URL("obsidian://show-plugin?id=" + bratID),
+		PluginLink:  template.URL("obsidian://brat?plugin=" + pluginRepo),
+		ConnectLink: template.URL("obsidian://vaultsync-setup?" + q.Encode()),
 	})
 }
 
@@ -133,7 +139,8 @@ type joinView struct {
 	// Typed as URLs on purpose: html/template rewrites an unknown scheme such as
 	// obsidian:// to a dead anchor unless told the value is trusted, and these are
 	// built here from constants and a code the server minted.
-	CatalogLink template.URL
+	BratLink    template.URL
+	PluginLink  template.URL
 	ConnectLink template.URL
 }
 
@@ -146,7 +153,7 @@ var joinTmpl = template.Must(template.New("join").Parse(`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Lockstep Sync</title>
+<title>VaultSync</title>
 <style>
 :root {
   --bg: #ffffff; --bg2: #f6f6f6; --border: #e0e0e0; --text: #222222; --muted: #5c5c5c;
@@ -180,12 +187,12 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 <body>
 <main>
 {{if .Expired}}
-<h1>Lockstep Sync</h1>
+<h1>VaultSync</h1>
 <p class="sub">This link has expired or was already used.</p>
-<div class="step"><p>Make a new one from a device that is already set up: Settings → Lockstep Sync → <strong>Link a new device</strong>. Each link works once and for a short while, on purpose.</p></div>
+<div class="step"><p>Make a new one from a device that is already set up: Settings → VaultSync → <strong>Link a new device</strong>. Each link works once and for a short while, on purpose.</p></div>
 {{else}}
-<h1>Lockstep Sync</h1>
-<p class="sub">A step-by-step guide to installing the Lockstep plugin and syncing a vault across several devices. This device joins vault <strong>{{.Vault}}</strong> on {{.Host}} as <strong>{{.Device}}</strong>.</p>
+<h1>VaultSync</h1>
+<p class="sub">A step-by-step guide to installing the VaultSync plugin and syncing a vault across several devices. This device joins vault <strong>{{.Vault}}</strong> on {{.Host}} as <strong>{{.Device}}</strong>.</p>
 
 <div class="step">
 <h2>1. Create a vault</h2>
@@ -199,13 +206,19 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 </div>
 
 <div class="step">
-<h2>3. Install Lockstep Sync</h2>
-<p>Press <strong>Install</strong>, then <strong>Enable</strong>.</p>
-<a class="btn" href="{{.CatalogLink}}">Install Lockstep Sync</a>
+<h2>3. Install BRAT</h2>
+<p>VaultSync is installed from its GitHub releases by BRAT, a community plugin that also keeps it up to date. Press <strong>Install</strong>, then <strong>Enable</strong>.</p>
+<a class="btn" href="{{.BratLink}}">Install BRAT</a>
 </div>
 
 <div class="step">
-<h2>4. Connect</h2>
+<h2>4. Install VaultSync</h2>
+<p>BRAT opens with the repository filled in. Press <strong>Add plugin</strong>, then make sure VaultSync is enabled under <strong>Community plugins</strong>.</p>
+<a class="btn" href="{{.PluginLink}}">Install VaultSync</a>
+</div>
+
+<div class="step">
+<h2>5. Connect</h2>
 <p>Fills in the server address and this device's access, and syncing starts. If the vault is encrypted, the plugin asks for its passphrase first.</p>
 <a class="btn cta" href="{{.ConnectLink}}">Connect</a>
 </div>

@@ -52,7 +52,7 @@ const en: Dict = {
 	"conflict.gone": "{path} is no longer in the vault",
 	"conflict.pending": "{count} to decide",
 	"cmd.conflicts": "Resolve files changed on both sides",
-	"notice.conflictQueued": "Lockstep: {path} was changed on both sides. Both versions are kept.",
+	"notice.conflictQueued": "VaultSync: {path} was changed on both sides. Both versions are kept.",
 
 	"settings.retention.name": "Erase deleted files after",
 	"settings.retention.desc":
@@ -175,9 +175,9 @@ const en: Dict = {
 
 	"cmd.sync": "Sync now",
 
-	"notice.syncing": "Lockstep: syncing…",
-	"notice.syncQueued": "Lockstep: busy right now. Will sync as soon as it is done.",
-	"notice.syncDone": "Lockstep: {summary}",
+	"notice.syncing": "VaultSync: syncing…",
+	"notice.syncQueued": "VaultSync: busy right now. Will sync as soon as it is done.",
+	"notice.syncDone": "VaultSync: {summary}",
 
 	"status.syncing": "syncing…",
 	"status.progress": "{done} in, {path}",
@@ -191,15 +191,15 @@ const en: Dict = {
 
 	"cmd.pull": "Download everything from the server",
 
-	"notice.noConfig": "Lockstep: server URL or token is missing",
-	"notice.pullStarted": "Lockstep: downloading…",
-	"notice.pullDone": "Lockstep: {summary}",
+	"notice.noConfig": "VaultSync: server URL or token is missing",
+	"notice.pullStarted": "VaultSync: downloading…",
+	"notice.pullDone": "VaultSync: {summary}",
 	"notice.indexReset": "Index reset",
 	"notice.unreachable":
-		"Lockstep: no answer from {url}. Check the address in the settings, and that the server is running. Nothing is lost while it is away: edits wait here and go when it comes back.",
-	"notice.error": "Lockstep — {what}: {message}",
+		"VaultSync: no answer from {url}. Check the address in the settings, and that the server is running. Nothing is lost while it is away: edits wait here and go when it comes back.",
+	"notice.error": "VaultSync — {what}: {message}",
 
-	"status.prefix": "Lockstep",
+	"status.prefix": "VaultSync",
 	"status.encrypted": "encrypted",
 	"status.lockedShort": "locked",
 	"status.notConnected": "not connected",
@@ -214,10 +214,10 @@ const en: Dict = {
 	"settings.readOnly.desc":
 		"This device only reads: it takes every change from the server and sends nothing back. Notes open in reading view. Anything changed here anyway is put back to the server's version on the next sync, with this device's version kept aside as a copy that stays here.",
 	"status.readOnly": "read-only",
-	"readOnly.refused": "Lockstep: this device is read-only. Turn it off in the settings to do this.",
+	"readOnly.refused": "VaultSync: this device is read-only. Turn it off in the settings to do this.",
 	"readOnly.kept": "{count} changes made here replaced by the server's version, copies kept",
-	"readOnly.turnedOn": "Lockstep: this device is read-only now.",
-	"readOnly.turnedOff": "Lockstep: this device syncs both ways again.",
+	"readOnly.turnedOn": "VaultSync: this device is read-only now.",
+	"readOnly.turnedOff": "VaultSync: this device syncs both ways again.",
 	"readOnly.cancel": "Cancel",
 	"readOnly.on.title": "Make this device read-only",
 	"readOnly.on.pending":
@@ -225,11 +225,11 @@ const en: Dict = {
 	"readOnly.on.sync": "Sync them first",
 	"readOnly.on.replace": "Replace with the server's version",
 	"readOnly.on.conflicts":
-		"Lockstep: {count} conflicts are waiting for a decision. Resolve them first: a read-only device cannot send one.",
+		"VaultSync: {count} conflicts are waiting for a decision. Resolve them first: a read-only device cannot send one.",
 	"readOnly.on.migrating":
-		"Lockstep: this device is still encrypting the vault. Let it finish before making it read-only.",
+		"VaultSync: this device is still encrypting the vault. Let it finish before making it read-only.",
 	"readOnly.on.stillPending":
-		"Lockstep: some changes could not be sent, so the device stays as it was. Try again once the sync goes through.",
+		"VaultSync: some changes could not be sent, so the device stays as it was. Try again once the sync goes through.",
 	"readOnly.off.title": "Sync both ways again",
 	"readOnly.off.intro":
 		"{count} files were made on this device and never reached the server. Those left on go up with the next sync; those turned off stay on this device only.",
@@ -276,9 +276,9 @@ const ru: Dict = {
 	"conflict.gone": "{path} больше нет в волте",
 	"conflict.pending": "решить: {count}",
 	"cmd.conflicts": "Разобрать файлы, изменённые с двух сторон",
-	"notice.conflictQueued": "Lockstep: {path} правили с двух сторон. Обе версии сохранены.",
+	"notice.conflictQueued": "VaultSync: {path} правили с двух сторон. Обе версии сохранены.",
 	"notice.unreachable":
-		"Lockstep: {url} не отвечает. Проверь адрес в настройках и что сервер запущен. Пока его нет, ничего не теряется: правки ждут здесь и уедут, когда он вернётся.",
+		"VaultSync: {url} не отвечает. Проверь адрес в настройках и что сервер запущен. Пока его нет, ничего не теряется: правки ждут здесь и уедут, когда он вернётся.",
 
 	"settings.retention.name": "Стирать удалённое через",
 	"settings.retention.desc":
@@ -401,9 +401,9 @@ const ru: Dict = {
 
 	"cmd.sync": "Синхронизировать сейчас",
 
-	"notice.syncing": "Lockstep: синхронизирую…",
-	"notice.syncQueued": "Lockstep: сейчас занят. Синхронизирую, как только закончу.",
-	"notice.syncDone": "Lockstep: {summary}",
+	"notice.syncing": "VaultSync: синхронизирую…",
+	"notice.syncQueued": "VaultSync: сейчас занят. Синхронизирую, как только закончу.",
+	"notice.syncDone": "VaultSync: {summary}",
 
 	"status.syncing": "синхронизирую…",
 	"status.progress": "принято {done}, {path}",
@@ -417,13 +417,13 @@ const ru: Dict = {
 
 	"cmd.pull": "Скачать всё с сервера",
 
-	"notice.noConfig": "Lockstep: не заданы адрес сервера или токен",
-	"notice.pullStarted": "Lockstep: скачиваю…",
-	"notice.pullDone": "Lockstep: {summary}",
+	"notice.noConfig": "VaultSync: не заданы адрес сервера или токен",
+	"notice.pullStarted": "VaultSync: скачиваю…",
+	"notice.pullDone": "VaultSync: {summary}",
 	"notice.indexReset": "Индекс сброшен",
-	"notice.error": "Lockstep — {what}: {message}",
+	"notice.error": "VaultSync — {what}: {message}",
 
-	"status.prefix": "Lockstep",
+	"status.prefix": "VaultSync",
 	"status.encrypted": "зашифровано",
 	"status.lockedShort": "закрыто",
 	"status.notConnected": "не подключено",
@@ -438,10 +438,10 @@ const ru: Dict = {
 	"settings.readOnly.desc":
 		"Это устройство только читает: принимает все изменения с сервера и ничего не отправляет. Заметки открываются в режиме чтения. Всё, что всё же изменено здесь, при следующей синхронизации возвращается к версии сервера, а версия этого устройства сохраняется копией, которая остаётся здесь.",
 	"status.readOnly": "только чтение",
-	"readOnly.refused": "Lockstep: устройство в режиме только чтения. Выключите его в настройках, чтобы сделать это.",
+	"readOnly.refused": "VaultSync: устройство в режиме только чтения. Выключите его в настройках, чтобы сделать это.",
 	"readOnly.kept": "изменений, заменённых версией сервера: {count}, копии сохранены",
-	"readOnly.turnedOn": "Lockstep: устройство теперь только читает.",
-	"readOnly.turnedOff": "Lockstep: устройство снова синхронизирует в обе стороны.",
+	"readOnly.turnedOn": "VaultSync: устройство теперь только читает.",
+	"readOnly.turnedOff": "VaultSync: устройство снова синхронизирует в обе стороны.",
 	"readOnly.cancel": "Отмена",
 	"readOnly.on.title": "Сделать устройство только для чтения",
 	"readOnly.on.pending":
@@ -449,11 +449,11 @@ const ru: Dict = {
 	"readOnly.on.sync": "Сначала синхронизировать",
 	"readOnly.on.replace": "Заменить версией сервера",
 	"readOnly.on.conflicts":
-		"Lockstep: конфликтов, ждущих решения: {count}. Сначала разрешите их: устройство только для чтения не может отправить решение.",
+		"VaultSync: конфликтов, ждущих решения: {count}. Сначала разрешите их: устройство только для чтения не может отправить решение.",
 	"readOnly.on.migrating":
-		"Lockstep: это устройство ещё шифрует хранилище. Дайте ему закончить, прежде чем включать только чтение.",
+		"VaultSync: это устройство ещё шифрует хранилище. Дайте ему закончить, прежде чем включать только чтение.",
 	"readOnly.on.stillPending":
-		"Lockstep: часть изменений не удалось отправить, поэтому режим не изменён. Попробуйте снова, когда синхронизация пройдёт.",
+		"VaultSync: часть изменений не удалось отправить, поэтому режим не изменён. Попробуйте снова, когда синхронизация пройдёт.",
 	"readOnly.off.title": "Снова синхронизировать в обе стороны",
 	"readOnly.off.intro":
 		"Файлов, созданных на этом устройстве и не дошедших до сервера: {count}. Включённые уйдут со следующей синхронизацией, выключенные останутся только здесь.",

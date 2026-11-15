@@ -25,9 +25,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/api"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/vault"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/api"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/vault"
 )
 
 func main() {

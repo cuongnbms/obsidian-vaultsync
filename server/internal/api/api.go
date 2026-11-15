@@ -21,9 +21,9 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/auth"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/blob"
-	"github.com/cuongnbms/obsidian-lockstep-sync/server/internal/store"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/auth"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/blob"
+	"github.com/cuongnbms/obsidian-vaultsync/server/internal/store"
 )
 
 // Vaults is the registry of open vaults. One vault = its own SQLite database and
