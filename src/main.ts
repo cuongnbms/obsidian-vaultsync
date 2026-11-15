@@ -7,11 +7,11 @@ import { showConflictNotice } from "./conflict-notice";
 import { RestoreModal } from "./restore-modal";
 import { ReadOnlyOffModal, ReadOnlyOnModal } from "./read-only-modal";
 import { AddDeviceModal } from "./onboarding";
-import { VaultCipher, WrongPassphrase, plaintext, type Cipher, type PathCipher, type Migration, type VaultKeyRecord } from "./crypto";
+import { EncryptionController, isUnreachable } from "./encryption-controller";
 import { t } from "./i18n";
 import { LocalIndex } from "./index-store";
 import { defaultDeviceName, toNFC } from "./paths";
-import { SyncEngine, listPaths, mayPassWithoutKeyAnswer, type SyncReport } from "./sync-engine";
+import { SyncEngine, type SyncReport } from "./sync-engine";
 import { DEFAULT_SETTINGS, SyncSettingsTab, type SyncSettings, defaultExcludes } from "./settings";
 
 /** How long to wait after the last edit before syncing. Obsidian fires on every keystroke. */
@@ -34,34 +34,10 @@ export default class LockstepPlugin extends Plugin {
 	private statusBar: HTMLElement | null = null;
 	private lastStatus = t("status.notConnected");
 	private debounce: number | null = null;
-	private cipher: Cipher = plaintext;
-	private pathCipher: PathCipher | null = null;
-	private cipherStatus = "";
-	/**
-	 * Encryption is switched on but the key is not available.
-	 *
-	 * Syncing has to stop here rather than fall back to plaintext. Falling back would
-	 * publish to the server exactly the notes this setting exists to hide, and it
-	 * would do it quietly.
-	 */
-	private locked = false;
-	/** Said once, not on every pass. */
-	private announcedEncryptedVault = false;
 	/** A server that cannot be reached says so once, not once a minute. */
 	private announcedUnreachable = false;
 	private focusPassphrase = false;
-	/** Whether the vault already has key parameters. Null until asked. */
-	private vaultHasKey: boolean | null = null;
-	/** Whether the vault stores files under sealed names, as its key record says. */
-	private vaultHidesNames: boolean | null = null;
-	/** The server and token the two answers above came from. */
-	private binding = "";
-	/** The migration marker last seen on the key record, while one is running. */
-	private migration: Migration | null = null;
-	/** In flight, so two callers do not both do it and both report it. */
-	private unlocking: Promise<void> | null = null;
-	/** The passphrase whose outcome is already known and already announced. */
-	private settledPassphrase: string | null = null;
+	private encryption!: EncryptionController;
 	/** Which vault on the server this device is bound to, as the server names it. */
 	private serverVault = "";
 	/** Whether the bound server vault holds nothing yet. Cached once it is false. */
@@ -119,7 +95,25 @@ export default class LockstepPlugin extends Plugin {
 
 	override async onload(): Promise<void> {
 		await this.loadSettings();
-		this.binding = this.bindingOf(this.settings);
+		this.encryption = new EncryptionController({
+			settings: () => this.settings,
+			client: (complain) => this.client(complain),
+			plainClient: () =>
+				new SyncClient(
+					this.settings.serverUrl,
+					this.settings.token,
+					this.settings.deviceName,
+					null,
+					this.settings.readOnly,
+				),
+			notice: (text, ms) => new Notice(text, ms),
+			setStatus: (text) => this.setStatus(text),
+			syncNow: (quiet) => this.syncNow(quiet),
+			encryptInPlace: (quiet) => this.encryptInPlace(quiet),
+			excludedOnServer: (plain) => this.engine.excludedOnServer(plain),
+			localFileCount: () => this.app.vault.getFiles().length,
+			serverIsEmpty: (client) => this.serverIsEmpty(client),
+		});
 
 		const dir = normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`);
 		this.index = new LocalIndex(this.app.vault.adapter, dir);
@@ -130,8 +124,8 @@ export default class LockstepPlugin extends Plugin {
 			index: this.index,
 			settings: this.settings,
 			client: () => this.client(false),
-			cipher: () => this.cipher,
-			guard: (manual) => this.reasonNotToSync(manual),
+			cipher: () => this.encryption.cipher,
+			guard: (manual) => this.encryption.reasonNotToSync(manual),
 			listLocalFiles: () => this.app.vault.getFiles().map((f) => f.path),
 			stopped: () => this.unloaded,
 			serverFileCount: () => this.serverFiles,
@@ -149,7 +143,7 @@ export default class LockstepPlugin extends Plugin {
 									? "progress.encrypting"
 									: this.engine.busy && this.engine.phase === "pull"
 										? "progress.download"
-										: this.cipher.enabled
+										: this.encryption.cipher.enabled
 										? "progress.encrypted"
 										: "progress.plain",
 								{ pct, done, total },
@@ -264,21 +258,9 @@ export default class LockstepPlugin extends Plugin {
 	}
 
 	async saveSettings(): Promise<void> {
-		// Another server, or another vault on it: what the old one said about its key
-		// says nothing about this one. A stale "no key" would let the guard wave a
-		// pass through on the first hiccup.
-		const binding = this.bindingOf(this.settings);
-		if (binding !== this.binding) {
-			this.binding = binding;
-			this.vaultHasKey = null;
-			this.vaultHidesNames = null;
-		}
+		this.encryption?.settingsSaved();
 		await this.saveData(this.settings);
 		this.engine?.updateSettings(this.settings);
-	}
-
-	private bindingOf(settings: SyncSettings): string {
-		return `${settings.serverUrl}\n${settings.token}`;
 	}
 
 	statusLine(): string {
@@ -355,216 +337,40 @@ export default class LockstepPlugin extends Plugin {
 	}
 
 	encryptionStatus(): string {
-		return this.cipherStatus || t("encryption.locked");
+		return this.encryption.encryptionStatus();
 	}
 
-	/**
-	 * True when this vault has no key yet, so a passphrase typed here is being
-	 * chosen rather than recalled, and cannot be changed afterwards.
-	 */
 	vaultNeedsSetup(): boolean {
-		return this.vaultHasKey === false;
+		return this.encryption.vaultNeedsSetup();
 	}
 
-	/** True when the vault demands a passphrase this device has not supplied. */
 	isLocked(): boolean {
-		return this.locked;
+		return this.encryption.isLocked();
 	}
 
-	/** True when names are hidden too, not only content. */
 	hidesNames(): boolean {
-		return this.pathCipher !== null;
+		return this.encryption.hidesNames();
 	}
 
-	/** True when the vault is open and uploads are actually being encrypted. */
 	encryptionReady(): boolean {
-		return this.encryptionWanted() && !this.locked;
+		return this.encryption.encryptionReady();
 	}
 
-	/** True when this device started encrypting the vault and has not finished. */
 	migrationHere(): boolean {
-		return this.migration?.mine === true;
+		return this.encryption.migrationHere();
 	}
 
-	/** The device encrypting the vault right now, when it is not this one. */
 	migrationElsewhere(): string | null {
-		return this.migration && !this.migration.mine ? this.migration.device : null;
+		return this.encryption.migrationElsewhere();
 	}
 
-	/**
-	 * Whether this device means to encrypt. A passphrase is the intent; there is no
-	 * switch to also flip, because a switch that must agree with a field is a step
-	 * that exists only to be forgotten.
-	 */
 	encryptionWanted(): boolean {
-		return this.settings.passphrase.length > 0;
+		return this.encryption.encryptionWanted();
 	}
 
-	/**
-	 * Bring encryption into the state the settings ask for.
-	 *
-	 * The key parameters live on the server, so the first device to enable encryption
-	 * writes them and every other device reads them and checks the passphrase against
-	 * them. That is what makes a second device able to join knowing only the words.
-	 *
-	 * Several things call this: loading, leaving the passphrase field, pressing the
-	 * button, and every pass that finds the vault locked. On a phone the button press
-	 * blurs the field first, so two of them arrive together, and a wrong passphrase
-	 * used to be announced again by every pass that followed.
-	 *
-	 * So: one attempt at a time, and nothing said twice about the same passphrase
-	 * once its outcome is known. Quiet callers, the ones that are retrying rather
-	 * than being asked, say nothing at all.
-	 */
-	async applyEncryption(quiet = false, allowCreate = false): Promise<void> {
-		if (this.unlocking) return this.unlocking;
-		if (
-			!allowCreate &&
-			this.settledPassphrase === this.settings.passphrase &&
-			(this.cipher.enabled || this.locked)
-		) {
-			return;
-		}
-		this.unlocking = this.attemptEncryption(quiet, allowCreate).finally(() => {
-			this.unlocking = null;
-		});
-		return this.unlocking;
-	}
-
-	private async attemptEncryption(quiet: boolean, allowCreate: boolean): Promise<void> {
-		if (!this.settings.passphrase) {
-			// No passphrase means no encryption, unless the vault itself disagrees,
-			// which the guard discovers by asking the server and locks us for.
-			this.cipher = plaintext;
-			this.pathCipher = null;
-			this.locked = false;
-			this.cipherStatus = t("encryption.off");
-			return;
-		}
-		const client = this.client(false);
-		if (!client) return;
-		try {
-			const stored = (await client.getVaultKey()) as VaultKeyRecord | null;
-			this.vaultHasKey = stored !== null;
-			if (stored) this.vaultHidesNames = stored.paths === "encrypted";
-			this.migration = stored?.migration ?? null;
-			if (stored && this.migration && !this.migration.mine) {
-				// Another device is in the middle of re-uploading the vault encrypted.
-				// Joining now would read a vault that is half one thing and half the
-				// other. Not settled: the next pass asks again, and the wait ends on
-				// its own when the marker goes.
-				this.cipher = plaintext;
-				this.pathCipher = null;
-				this.locked = true;
-				this.cipherStatus = t("encryption.inProgressElsewhere", { device: this.migration.device });
-				this.setStatus(this.cipherStatus);
-				if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
-				return;
-			}
-			if (stored) {
-				const cipher = await VaultCipher.unlock(this.settings.passphrase, stored);
-				this.cipher = cipher;
-				this.pathCipher = stored.paths === "encrypted" ? await cipher.pathCipher() : null;
-				this.locked = false;
-				this.announcedEncryptedVault = false;
-				this.settledPassphrase = this.settings.passphrase;
-				if (this.migration) {
-					// Ours, and interrupted. It continues without being asked: the
-					// question was answered when the button was pressed.
-					this.cipherStatus = t("encryption.encrypting");
-					void this.encryptInPlace(quiet);
-					return;
-				}
-				this.cipherStatus = t(
-					this.pathCipher ? "encryption.readyWithPaths" : "encryption.ready",
-				);
-				// Whether a vault is actually hidden is the one thing somebody turning
-				// this on wants confirmed. A grey caption under a text field is not a
-				// confirmation.
-				if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
-				// And start at once. Waiting for the timer meant a minute of nothing
-				// happening on a device that had just been told everything was fine.
-				void this.syncNow(true);
-			} else if (!allowCreate) {
-				// Creating the vault key is the one irreversible act here, and it only
-				// happens on the Set button. Anything else that lands with a passphrase
-				// and no key, a blur half-way through typing, an automatic retry, waits
-				// and says which press is missing. Losing a vault to the fragment of a
-				// passphrase somebody paused in the middle of is not a risk worth the
-				// convenience.
-				this.cipher = plaintext;
-				this.pathCipher = null;
-				this.locked = true;
-				this.cipherStatus = t("encryption.pressSet");
-				if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
-			} else {
-				// The same key record whether the vault starts empty or full: names
-				// hidden, content hidden. A vault that already holds readable files is
-				// brought to that state by encryptInPlace, right after the key is set.
-				const stats = await client.stats();
-				const occupied = Number(stats["files"] ?? 0) + Number(stats["folders"] ?? 0) > 0;
-				if (occupied) {
-					// Asked before the key is set, because a key cannot be taken back: a
-					// device that excludes files other devices keep cannot encrypt them,
-					// and erasing their readable copies would lose them.
-					const plain = new SyncClient(
-			this.settings.serverUrl,
-			this.settings.token,
-			this.settings.deviceName,
-			null,
-			this.settings.readOnly,
-		);
-					const excluded = await this.engine.excludedOnServer(plain);
-					if (excluded.length > 0) {
-						this.cipher = plaintext;
-						this.pathCipher = null;
-						this.locked = true;
-						this.cipherStatus = t("encryption.excludedOnServer", { paths: listPaths(excluded) });
-						new Notice(`Lockstep: ${this.cipherStatus}`, 15000);
-						return;
-					}
-				}
-				const { cipher, params } = await VaultCipher.create(this.settings.passphrase);
-				this.vaultHasKey = true;
-				this.vaultHidesNames = true;
-				await client.putVaultKey(params);
-				this.cipher = cipher;
-				this.pathCipher = await cipher.pathCipher();
-				this.locked = false;
-				this.announcedEncryptedVault = false;
-				this.settledPassphrase = this.settings.passphrase;
-				if (occupied) {
-					this.cipherStatus = t("encryption.encrypting");
-					await this.encryptInPlace(quiet);
-					return;
-				}
-				this.cipherStatus = t("encryption.created");
-				if (!quiet) new Notice(t("encryption.created"), 10000);
-				void this.syncNow(true);
-			}
-		} catch (e) {
-			// A wrong passphrase must never fall back to writing plaintext: that would
-			// quietly publish the notes this setting exists to hide.
-			this.cipher = plaintext;
-			this.pathCipher = null;
-			this.locked = true;
-			// A wrong passphrase is a settled answer and is said once. Anything else,
-			// a server that was not there yet, stays unsettled so the next pass tries
-			// again without a word.
-			if (e instanceof WrongPassphrase) {
-				this.cipherStatus = t("encryption.wrong");
-				this.settledPassphrase = this.settings.passphrase;
-				if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 10000);
-			} else {
-				this.cipherStatus = t("encryption.failed", {
-					message: e instanceof Error ? e.message : String(e),
-				});
-				if (!quiet && !this.isUnreachable(this.cipherStatus)) {
-					new Notice(`Lockstep: ${this.cipherStatus}`, 10000);
-				}
-			}
-			throw e;
-		}
+	/** See EncryptionController.applyEncryption. */
+	applyEncryption(quiet = false, allowCreate = false): Promise<void> {
+		return this.encryption.applyEncryption(quiet, allowCreate);
 	}
 
 	async getRetention(): Promise<number> {
@@ -632,7 +438,7 @@ export default class LockstepPlugin extends Plugin {
 		this.settings.token = token;
 		this.announcedUnreachable = false;
 		this.serverEmpty = null;
-		this.announcedEncryptedVault = false;
+		this.encryption.rebound();
 		if (params["device"]) this.settings.deviceName = params["device"].trim();
 		await this.saveSettings();
 		await this.refreshServerVault();
@@ -648,7 +454,7 @@ export default class LockstepPlugin extends Plugin {
 		if (client) {
 			try {
 				needsPassphrase = (await client.getVaultKey()) !== null;
-				this.vaultHasKey = needsPassphrase;
+				this.encryption.heardVaultHasKey(needsPassphrase);
 			} catch {
 				/* cannot tell yet; the next pass will */
 			}
@@ -740,7 +546,7 @@ export default class LockstepPlugin extends Plugin {
 			new Notice(t("readOnly.on.conflicts", { count: this.index.conflicts.length }), 8000);
 			return Promise.resolve();
 		}
-		if (on && this.migration?.mine) {
+		if (on && this.encryption.migrationHere()) {
 			// The server takes writes from nobody else until this device finishes.
 			new Notice(t("readOnly.on.migrating"), 8000);
 			return Promise.resolve();
@@ -833,8 +639,8 @@ export default class LockstepPlugin extends Plugin {
 		const parts = [`${t("status.prefix")}: ${text}`];
 		// A word rather than a symbol: the state has to be readable at a glance, and
 		// an icon makes somebody guess at what it is trying to say.
-		if (this.encryptionWanted() || this.locked) {
-			parts.push(this.locked ? t("status.lockedShort") : t("status.encrypted"));
+		if (this.encryptionWanted() || this.encryption.isLocked()) {
+			parts.push(this.encryption.isLocked() ? t("status.lockedShort") : t("status.encrypted"));
 		}
 		if (this.settings.readOnly) parts.push(t("status.readOnly"));
 		if (pending > 0) parts.push(t("conflict.pending", { count: pending }));
@@ -851,7 +657,7 @@ export default class LockstepPlugin extends Plugin {
 		// exactly the leak the sealed names exist to prevent. Content and paths are
 		// sealed by two separate objects, so whatever race or bug leaves the path key
 		// behind must stall the sync here rather than reach the network.
-		if (this.vaultHidesNames === true && !this.pathCipher) {
+		if (this.encryption.pathKeyMissing()) {
 			this.traceLine("refused to build a client: names are sealed and the path key is not ready");
 			if (complain) new Notice(`Lockstep: ${t("encryption.locked")}`, 8000);
 			return null;
@@ -860,7 +666,7 @@ export default class LockstepPlugin extends Plugin {
 			this.settings.serverUrl,
 			this.settings.token,
 			this.settings.deviceName,
-			this.pathCipher,
+			this.encryption.pathCipher,
 			this.settings.readOnly,
 		);
 	}
@@ -986,7 +792,7 @@ export default class LockstepPlugin extends Plugin {
 			const secs = ((Date.now() - started) / 1000).toFixed(1);
 			this.report(report, secs, quiet);
 			if (report.uploaded + report.downloaded > 0 && report.errors.length === 0) {
-				this.lastSummary = t(this.cipher.enabled ? "progress.doneEncrypted" : "progress.done");
+				this.lastSummary = t(this.encryption.cipher.enabled ? "progress.doneEncrypted" : "progress.done");
 				for (const el of this.progressTargets) el.setText(this.lastSummary);
 			}
 		} catch (e) {
@@ -1012,7 +818,7 @@ export default class LockstepPlugin extends Plugin {
 		}
 		try {
 			await this.applyEncryption(true);
-			if (!this.cipher.enabled) await this.applyEncryption(false, true);
+			if (!this.encryption.cipher.enabled) await this.applyEncryption(false, true);
 			else await this.encryptInPlace(false);
 		} catch {
 			/* already reported */
@@ -1025,7 +831,9 @@ export default class LockstepPlugin extends Plugin {
 	 * short. The engine does the work; this is the reporting around it.
 	 */
 	async encryptInPlace(quiet = false): Promise<void> {
-		if (!this.cipher.enabled || !this.pathCipher) return;
+		const cipher = this.encryption.cipher;
+		const paths = this.encryption.pathCipher;
+		if (!cipher.enabled || !paths) return;
 		// Re-uploading the vault is a write; a read-only device leaves it to another.
 		if (this.settings.readOnly) return;
 		const sealed = this.client(!quiet);
@@ -1042,14 +850,13 @@ export default class LockstepPlugin extends Plugin {
 			const report = await this.engine.encryptInPlace({
 				plain,
 				sealed,
-				cipher: this.cipher,
-				paths: this.pathCipher,
+				cipher,
+				paths,
 			});
-			this.migration = null;
+			this.encryption.migrationFinished();
 			this.serverEmpty = null;
 			await this.refreshServerVault();
 			const secs = ((Date.now() - started) / 1000).toFixed(0);
-			this.cipherStatus = t("encryption.readyWithPaths");
 			this.lastSummary = t("progress.doneMigrated");
 			this.showProgress(this.lastSummary);
 			this.setStatus(this.lastSummary);
@@ -1071,19 +878,6 @@ export default class LockstepPlugin extends Plugin {
 		}
 	}
 
-	/**
-	 * True when this looks like the server simply not being there.
-	 *
-	 * Worth separating from other failures: it is the one that repeats on every pass
-	 * until something changes in the world, and repeating it every minute buries
-	 * everything else the plugin has to say.
-	 */
-	private isUnreachable(message: string): boolean {
-		return /could not connect|failed to fetch|network|ERR_|ENOTFOUND|ECONNREFUSED|timed out/i.test(
-			message,
-		);
-	}
-
 	private report(report: SyncReport, secs: string, quiet: boolean): void {
 		const touched =
 			report.downloaded + report.uploaded + report.merged + report.conflicts + report.deleted + report.kept;
@@ -1100,21 +894,22 @@ export default class LockstepPlugin extends Plugin {
 		// Said every time, quiet or not: something typed here was replaced.
 		if (report.kept > 0) line += ` · ${t("readOnly.kept", { count: report.kept })}`;
 		// A pass the barrier stopped did nothing, and "up to date" would say otherwise.
-		const barrier = this.cipherStatus !== "" && report.errors.includes(this.cipherStatus);
-		this.setStatus(barrier ? this.cipherStatus : line);
+		const status = this.encryption.status;
+		const barrier = status !== "" && report.errors.includes(status);
+		this.setStatus(barrier ? status : line);
 		if (barrier) {
 			// The other barriers announce themselves from the guard; this one does not,
 			// since offline it would on every pass, so a sync asked for by hand says it.
-			if (!quiet && this.cipherStatus === t("status.keyUnknown")) {
-				new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
+			if (!quiet && status === t("status.keyUnknown")) {
+				new Notice(`Lockstep: ${status}`, 8000);
 			}
 		} else if (!quiet || report.conflicts > 0 || report.kept > 0) {
 			new Notice(t("notice.syncDone", { summary: line }));
 		}
 		// The barrier is a state, already on the status bar and already announced
 		// once. Reported as a sync error too, it doubled every notice around it.
-		const errors = report.errors.filter((e) => e !== this.cipherStatus);
-		const unreachable = errors.filter((e) => this.isUnreachable(e));
+		const errors = report.errors.filter((e) => e !== status);
+		const unreachable = errors.filter((e) => isUnreachable(e));
 		if (unreachable.length > 0) {
 			if (!this.announcedUnreachable) {
 				this.announcedUnreachable = true;
@@ -1128,90 +923,11 @@ export default class LockstepPlugin extends Plugin {
 		}
 	}
 
-	/**
-	 * Why syncing must not happen, or empty when it may.
-	 *
-	 * The important case is a vault that is encrypted while this device is not set up
-	 * for it. Reading it anyway produces filenames that are ciphertext and content
-	 * that is noise, and the device then tries to create files with those names. Far
-	 * better to notice, refuse, and say which of the two things is missing.
-	 */
-	private async reasonNotToSync(manual = false): Promise<string> {
-		// The passphrase is already here. Unlocking is something to do, not something
-		// to ask for again: the first attempt may simply have run before the network
-		// was ready, and making somebody press a button to recover from that is
-		// making them do the software's retry by hand.
-		if (this.settings.passphrase && !this.cipher.enabled) {
-			try {
-				// Quiet: this is a retry nobody asked for, and its failure has already
-				// been reported by whoever did ask.
-				await this.applyEncryption(true);
-			} catch {
-				// A wrong passphrase, and applyEncryption has already said so.
-			}
-		}
-		if (this.locked) return this.cipherStatus;
-		if (this.cipher.enabled) return "";
-
-		const client = this.client(false);
-		if (!client) return "";
-		try {
-			const key = (await client.getVaultKey()) as VaultKeyRecord | null;
-			this.vaultHasKey = key !== null;
-			if (key) this.vaultHidesNames = key.paths === "encrypted";
-			if (!key) {
-				// Answered at last, so the wait the status bar described is over.
-				if (this.cipherStatus === t("status.keyUnknown")) this.cipherStatus = t("encryption.off");
-				// No key and no passphrase. Before the very first upload of an existing
-				// vault into an empty server, that combination must not start on its
-				// own: whatever goes up now goes up readable, permanently, and the
-				// person may simply not have reached the passphrase field yet. One
-				// explicit Sync now says they have decided; a server that already
-				// holds files says the decision was made earlier.
-				if (!manual) {
-					const localFiles = this.app.vault.getFiles().length;
-					if (localFiles > 0 && (await this.serverIsEmpty(client))) {
-						this.cipherStatus = t("encryption.firstSyncChoice", {
-							count: localFiles,
-						});
-						this.setStatus(this.cipherStatus);
-						if (!this.announcedEncryptedVault) {
-							this.announcedEncryptedVault = true;
-							new Notice(`Lockstep: ${this.cipherStatus}`, 15000);
-						}
-						return this.cipherStatus;
-					}
-				}
-				return "";
-			}
-		} catch {
-			// Cannot tell. Already told "no key" this session, this is a hiccup and
-			// refusing would help nobody. Never told, the vault may hide its names, and
-			// a plaintext pass would publish readable ones (see mayPassWithoutKeyAnswer).
-			// Said on the status bar only: offline, every pass lands here.
-			if (mayPassWithoutKeyAnswer(this.vaultHasKey)) return "";
-			this.cipherStatus = t("status.keyUnknown");
-			this.setStatus(this.cipherStatus);
-			return this.cipherStatus;
-		}
-		// The vault has a key and this device has none.
-		this.locked = true;
-		this.cipherStatus = t(
-			this.encryptionWanted() ? "encryption.locked" : "encryption.vaultIsEncrypted",
-		);
-		this.setStatus(this.cipherStatus);
-		if (!this.announcedEncryptedVault) {
-			this.announcedEncryptedVault = true;
-			new Notice(`Lockstep: ${this.cipherStatus}`, 15000);
-		}
-		return this.cipherStatus;
-	}
-
 	/** True when encryption is on and the vault is not open. Nothing may move. */
 	private blocked(quiet: boolean): boolean {
-		if (!this.locked) return false;
-		this.setStatus(this.cipherStatus);
-		if (!quiet) new Notice(`Lockstep: ${this.cipherStatus}`, 8000);
+		if (!this.encryption.isLocked()) return false;
+		this.setStatus(this.encryption.status);
+		if (!quiet) new Notice(`Lockstep: ${this.encryption.status}`, 8000);
 		return true;
 	}
 
@@ -1271,7 +987,7 @@ export default class LockstepPlugin extends Plugin {
 					: String(e);
 		console.error(`[lockstep-sync] ${what}:`, e);
 		this.setStatus(t("status.error", { message: msg }));
-		if (this.isUnreachable(msg)) {
+		if (isUnreachable(msg)) {
 			if (this.announcedUnreachable) return;
 			this.announcedUnreachable = true;
 			new Notice(t("notice.unreachable", { url: this.settings.serverUrl }), 12000);

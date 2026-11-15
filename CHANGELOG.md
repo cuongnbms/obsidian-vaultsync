@@ -79,6 +79,12 @@ refused and reported once, and the file on disk is left as it was. SECURITY.md n
 says what the server can still do: swap sealed files between names or put an older
 sealed revision back.
 
+In a vault that hides file names, a device could not unlock once it had been
+locked out: a wrong passphrase corrected, a passphrase typed after the first sync
+had already stopped at the lock, or another device finishing encrypting the vault
+all left it locked until Obsidian was restarted. It now unlocks as soon as the
+right passphrase is there.
+
 ## 1.0.10
 
 A file created again at a path that had been deleted never reached the server, and
